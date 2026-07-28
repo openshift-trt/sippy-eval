@@ -178,24 +178,27 @@ class TestDataMode:
     def _patch_dotenv(self, vals):
         return mock.patch("server.dotenv_values", return_value=vals)
 
+    def _patch_env_file_exists(self):
+        return mock.patch("server._DEVCONTAINER_ENV", **{"is_file.return_value": True})
+
     def test_default_is_seed(self):
-        with self._patch_dotenv({}):
+        with self._patch_env_file_exists(), self._patch_dotenv({}):
             assert _data_mode() == "seed"
 
     def test_seed_mode(self):
-        with self._patch_dotenv({"SIPPY_DATA_MODE": "seed"}):
+        with self._patch_env_file_exists(), self._patch_dotenv({"SIPPY_DATA_MODE": "seed"}):
             assert _data_mode() == "seed"
 
     def test_prod_like_mode(self):
-        with self._patch_dotenv({"SIPPY_DATA_MODE": "prod-like"}):
+        with self._patch_env_file_exists(), self._patch_dotenv({"SIPPY_DATA_MODE": "prod-like"}):
             assert _data_mode() == "prod-like"
 
     def test_invalid_mode_falls_back_to_seed(self):
-        with self._patch_dotenv({"SIPPY_DATA_MODE": "invalid"}):
+        with self._patch_env_file_exists(), self._patch_dotenv({"SIPPY_DATA_MODE": "invalid"}):
             assert _data_mode() == "seed"
 
     def test_case_insensitive(self):
-        with self._patch_dotenv({"SIPPY_DATA_MODE": "PROD-LIKE"}):
+        with self._patch_env_file_exists(), self._patch_dotenv({"SIPPY_DATA_MODE": "PROD-LIKE"}):
             assert _data_mode() == "prod-like"
 
     def test_no_env_file(self):
