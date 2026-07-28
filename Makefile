@@ -55,7 +55,7 @@ mcp-venv: mcp/.venv/.requirements-installed
 
 mcp/.venv/.requirements-installed: mcp/requirements.txt
 	test -x mcp/.venv/bin/python || python3 -m venv mcp/.venv
-	mcp/.venv/bin/pip install -q -r mcp/requirements.txt
+	mcp/.venv/bin/pip install -q -r mcp/requirements.txt pytest
 	@touch $@
 
 npm: sippy-ng/node_modules/.package-lock.json
