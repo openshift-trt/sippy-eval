@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import tempfile
 from pathlib import Path
@@ -20,6 +21,16 @@ from server import (
     _trim,
     _wait_for_url,
 )
+
+
+@contextlib.contextmanager
+def _combined_dotenv_patch(vals):
+    """Patch both dotenv_values and _DEVCONTAINER_ENV.is_file() so _data_mode()
+    uses the supplied values even when the .env file doesn't exist on disk."""
+    with mock.patch("server.dotenv_values", return_value=vals), \
+         mock.patch("server._DEVCONTAINER_ENV") as mock_path:
+        mock_path.is_file.return_value = True
+        yield
 
 
 class TestRepoPath:
@@ -176,7 +187,7 @@ class TestResolveBigqueryCreds:
 
 class TestDataMode:
     def _patch_dotenv(self, vals):
-        return mock.patch("server.dotenv_values", return_value=vals)
+        return _combined_dotenv_patch(vals)
 
     def test_default_is_seed(self):
         with self._patch_dotenv({}):
