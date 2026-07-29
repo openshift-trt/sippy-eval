@@ -419,9 +419,16 @@ async def sippy_serve(
     if existing:
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
-            pids = ", ".join(str(p) for p in existing)
+            ready_url = f"{host_hint}{_READY_PATH}"
+            err = await _poll_ready(ready_url, _READY_TIMEOUT, pids=existing)
+            pid_str = ", ".join(str(p) for p in existing)
+            if err:
+                return (
+                    f"sippy_serve process running (pid(s) {pid_str}) but {err}. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pid_str}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -470,7 +477,7 @@ async def sippy_serve(
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=f"{host_hint}{_READY_PATH}",
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -544,6 +551,40 @@ async def sippy_ng_start(
         f"sippy_ng_start started and ready (pid {pid_or_err}). URL: http://127.0.0.1:3000/sippy-ng "
         f"log: {log_path}"
     )
+
+
+_READY_PATH = "/api/releases"
+_READY_TIMEOUT = 120
+
+
+def _pid_exists(pid: int) -> bool:
+    """Return True if *pid* is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def _poll_ready(url: str, timeout: int, pids: list[int] | None = None) -> str | None:
+    """Poll *url* until it returns a successful HTTP response or *timeout* seconds elapse.
+
+    If *pids* is given, returns early when none of the PIDs are alive.
+    Returns an error string on failure, or ``None`` on success.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if pids and not any(_pid_exists(p) for p in pids):
+            return "process(es) exited while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
 
 
 async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
