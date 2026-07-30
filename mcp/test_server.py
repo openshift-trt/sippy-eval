@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,51 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def test_succeeds_immediately(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_wait_for_ready("http://localhost:8080", timeout=5))
+        assert result is None
+
+    def test_succeeds_after_retries(self):
+        call_count = 0
+
+        def flaky_urlopen(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("not yet")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=flaky_urlopen):
+            result = asyncio.run(_wait_for_ready("http://localhost:8080", timeout=30))
+        assert result is None
+        assert call_count == 3
+
+    def test_times_out(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(_wait_for_ready("http://localhost:8080", timeout=2))
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_detects_process_exit(self):
+        proc = mock.MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080", timeout=30, proc=proc)
+            )
+        assert result is not None
+        assert "process exited" in result
+
+    def test_no_proc_skips_poll(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080", timeout=5, proc=None)
+            )
+        assert result is None
