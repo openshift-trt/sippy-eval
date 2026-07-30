@@ -11,6 +11,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +298,15 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+    def test_permission_error_treated_as_alive(self):
+        with mock.patch("server.os.kill", side_effect=PermissionError):
+            assert _pid_alive(1) is True
