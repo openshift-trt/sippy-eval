@@ -2241,6 +2241,15 @@ func (s *Server) Serve() {
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
+	// Redirect /sippy-ng to /sippy-ng/ so the SPA handler and React Router match correctly.
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		target := "/sippy-ng/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
 	// goes to index.html
 	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
