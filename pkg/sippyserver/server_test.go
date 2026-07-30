@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -86,6 +87,84 @@ func TestValidateProwJobRun(t *testing.T) {
 		})
 	}
 
+}
+
+func TestSippyNGTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("sippy-ng app"))
+	})
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	tests := []struct {
+		name         string
+		path         string
+		wantCode     int
+		wantLocation string
+	}{
+		{
+			name:         "no trailing slash redirects",
+			path:         "/sippy-ng",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:         "no trailing slash preserves query params",
+			path:         "/sippy-ng?view=main",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/?view=main",
+		},
+		{
+			name:     "trailing slash serves app",
+			path:     "/sippy-ng/",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "subpath serves app",
+			path:     "/sippy-ng/component_readiness/main",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.wantCode {
+				t.Errorf("got status %d, want %d", resp.StatusCode, tc.wantCode)
+			}
+
+			if tc.wantLocation != "" {
+				got := resp.Header.Get("Location")
+				if got != tc.wantLocation {
+					t.Errorf("got Location %q, want %q", got, tc.wantLocation)
+				}
+			}
+		})
+	}
 }
 
 func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {

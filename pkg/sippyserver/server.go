@@ -2242,8 +2242,17 @@ func (s *Server) Serve() {
 	router.StrictSlash(true)
 
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
-	// goes to index.html
-	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// goes to index.html. PathPrefix("/sippy-ng") (without trailing slash) matches both /sippy-ng and
+	// /sippy-ng/... since StrictSlash does not apply to PathPrefix routes.
+	router.PathPrefix("/sippy-ng").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
 		fs := s.sippyNG
 		if r.URL.Path != "/sippy-ng/" {
 			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
