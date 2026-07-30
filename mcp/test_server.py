@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,45 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080", 5))
+        assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080", 2))
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_returns_none_without_proc(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080", 5, proc=None))
+        assert result is None
+
+    def test_detects_proc_exit(self):
+        proc = mock.MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = 1
+        result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080", 5, proc=proc))
+        assert result is not None
+        assert "process exited" in result
+
+    def test_retries_until_success(self):
+        call_count = 0
+
+        def flaky_urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=flaky_urlopen):
+            with mock.patch("asyncio.sleep", return_value=None):
+                result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080", 10))
+        assert result is None
+        assert call_count == 3
