@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +109,70 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedLoc    string
+	}{
+		{
+			name:           "without trailing slash redirects",
+			path:           "/sippy-ng",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "with trailing slash serves directly",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, resp.StatusCode)
+			}
+			if tc.expectedLoc != "" {
+				loc := resp.Header.Get("Location")
+				if loc != tc.expectedLoc {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLoc, loc)
+				}
+			}
+		})
 	}
 }
 

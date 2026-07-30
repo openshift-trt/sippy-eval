@@ -2876,8 +2876,7 @@ func (s *Server) Serve() {
 		// Try to open the file from static filesystem (embedded FS keeps directory structure)
 		filePath := "static" + r.URL.Path
 		if _, err := s.static.Open(filePath); err != nil {
-			// File doesn't exist in static, redirect to sippy-ng
-			if r.URL.Path == "/" {
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
 				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
