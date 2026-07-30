@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +299,45 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPollUrl:
+    def test_success_on_first_try(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_poll_url("http://127.0.0.1:8080", timeout=5))
+            assert result is None
+
+    def test_success_after_retries(self):
+        call_count = 0
+
+        def urlopen_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionRefusedError("not yet")
+
+        async def noop_sleep(_):
+            pass
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=urlopen_side_effect):
+            with mock.patch("server.asyncio.sleep", side_effect=noop_sleep):
+                result = asyncio.run(
+                    _poll_url("http://127.0.0.1:8080", timeout=30)
+                )
+                assert result is None
+                assert call_count == 3
+
+    def test_timeout_returns_error(self):
+        async def noop_sleep(_):
+            pass
+
+        with mock.patch(
+            "server.urllib.request.urlopen",
+            side_effect=ConnectionRefusedError("refused"),
+        ):
+            with mock.patch("server.asyncio.sleep", side_effect=noop_sleep):
+                result = asyncio.run(
+                    _poll_url("http://127.0.0.1:8080", timeout=0)
+                )
+                assert result is not None
+                assert "not ready" in result
