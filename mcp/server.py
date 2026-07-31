@@ -419,7 +419,14 @@ async def sippy_serve(
     if existing:
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+            ready_url = f"{host_hint}/api"
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_ready(ready_url, 120)
+            if err:
+                return (
+                    f"sippy_serve process found (pid(s) {pids}) but API not responding: {err}. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -470,7 +477,7 @@ async def sippy_serve(
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=f"{host_hint}/api",
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -546,14 +553,17 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+async def _wait_for_ready(
+    url: str, timeout: int, proc: subprocess.Popen | None = None
+) -> str | None:
     """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                return f"process exited (exit {code}) while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None

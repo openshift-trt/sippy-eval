@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,48 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def test_returns_none_on_successful_response(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080/api", timeout=5)
+            )
+        assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080/api", timeout=2)
+            )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_detects_process_exit_with_proc(self):
+        proc = mock.Mock(spec=subprocess.Popen)
+        proc.poll.return_value = 1
+        result = asyncio.run(
+            _wait_for_ready("http://localhost:8080/api", timeout=5, proc=proc)
+        )
+        assert result is not None
+        assert "process exited" in result
+
+    def test_skips_proc_check_when_none(self):
+        call_count = 0
+
+        def succeed_on_second(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ConnectionRefusedError
+            return mock.Mock()
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=succeed_on_second):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080/api", timeout=10)
+            )
+        assert result is None
+        assert call_count == 2
