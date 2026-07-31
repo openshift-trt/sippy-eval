@@ -1,5 +1,9 @@
+import asyncio
 import os
+import subprocess
 import tempfile
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +20,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +302,68 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class _OKHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestWaitForReady:
+    def test_succeeds_when_url_responds(self):
+        srv = HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        try:
+            result = asyncio.run(
+                _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5)
+            )
+            assert result is None
+        finally:
+            srv.server_close()
+
+    def test_times_out_when_url_unreachable(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=2)
+        )
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_detects_process_exit_via_proc(self):
+        proc = subprocess.Popen(
+            ["python3", "-c", "import sys; sys.exit(42)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait()
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=5, proc=proc)
+        )
+        assert result is not None
+        assert "process exited" in result
+        assert "42" in result
+
+    def test_succeeds_with_proc_when_url_responds(self):
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        srv = HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        try:
+            result = asyncio.run(
+                _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5, proc=proc)
+            )
+            assert result is None
+        finally:
+            proc.kill()
+            proc.wait()
+            srv.server_close()
