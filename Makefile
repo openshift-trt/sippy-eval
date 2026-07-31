@@ -17,7 +17,7 @@ all: test build
 
 build: builddir clean npm frontend sippy sippy-daemon
 
-.PHONY: verify apm verify-apm
+.PHONY: verify apm verify-apm mcp-test
 verify: lint verify-apm
 
 builddir:
@@ -42,6 +42,15 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	$(MAKE) mcp-test
+
+mcp/.venv/.installed-test: mcp/requirements-test.txt mcp/requirements.txt
+	python3 -m venv mcp/.venv
+	mcp/.venv/bin/pip install -q -r mcp/requirements-test.txt
+	@touch $@
+
+mcp-test: mcp/.venv/.installed-test
+	cd mcp; .venv/bin/python3 -m pytest test_server.py -v
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
