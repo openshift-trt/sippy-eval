@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,11 +14,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready_pid,
 )
 
 
@@ -273,6 +278,55 @@ class TestValidateRedisUrl:
 
     def test_whitespace_rejected(self):
         assert _validate_redis_url("redis://ok \t") is not None
+
+
+class TestPidAlive:
+    def test_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(99999999) is False
+
+
+class TestWaitForReadyPid:
+    def _start_http_server(self, port):
+        class _OKHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        return srv
+
+    def test_ready_immediately(self):
+        srv = self._start_http_server(0)
+        port = srv.server_address[1]
+        url = f"http://127.0.0.1:{port}"
+        result = asyncio.run(
+            _wait_for_ready_pid(url, 5, [os.getpid()])
+        )
+        assert result is None
+        srv.server_close()
+
+    def test_timeout_when_not_listening(self):
+        url = "http://127.0.0.1:19999"
+        result = asyncio.run(
+            _wait_for_ready_pid(url, 2, [os.getpid()])
+        )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_process_exit_detected(self):
+        result = asyncio.run(
+            _wait_for_ready_pid("http://127.0.0.1:19999", 5, [99999999])
+        )
+        assert result is not None
+        assert "process exited" in result
 
 
 class TestDefaults:
