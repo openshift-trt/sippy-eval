@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -11,11 +13,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +301,57 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class TestWaitForReady:
+    def test_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:9999", timeout=5)
+            )
+        assert result is None
+
+    def test_timeout_when_url_unreachable(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:9999", timeout=2)
+            )
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_proc_exit_detected(self):
+        proc = mock.MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = 1
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:9999", timeout=5, proc=proc)
+        )
+        assert "process exited" in result
+
+    def test_pids_exit_detected(self):
+        dead_pid = 2**22 - 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:9999", timeout=5, pids=[dead_pid])
+            )
+        assert "process(es) exited" in result
+
+    def test_pids_alive_waits_for_url(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready(
+                    "http://127.0.0.1:9999", timeout=5, pids=[os.getpid()]
+                )
+            )
+        assert result is None
