@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,11 +14,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +302,58 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+    def test_init_process(self):
+        assert _pid_alive(1) is True
+
+
+class _OKHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestWaitForReady:
+    @staticmethod
+    def _start_http_server():
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, port
+
+    def test_ready_immediately(self):
+        srv, port = self._start_http_server()
+        try:
+            err = asyncio.run(_wait_for_ready(
+                f"http://127.0.0.1:{port}", 5, pids=[os.getpid()],
+            ))
+            assert err is None
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_timeout_unreachable(self):
+        err = asyncio.run(_wait_for_ready(
+            "http://127.0.0.1:1", 2, pids=[os.getpid()],
+        ))
+        assert err is not None
+        assert "not ready after 2s" in err
+
+    def test_dead_pid_detected(self):
+        err = asyncio.run(_wait_for_ready(
+            "http://127.0.0.1:1", 30, pids=[2**22 - 1],
+        ))
+        assert err is not None
+        assert "process exited" in err
