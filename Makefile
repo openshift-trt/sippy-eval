@@ -33,7 +33,7 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+test: builddir npm test-mcp
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -42,6 +42,16 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+
+test-mcp: mcp-venv
+	cd mcp; .venv/bin/pytest test_server.py -v
+
+mcp-venv: mcp/.venv/.installed
+
+mcp/.venv/.installed: mcp/requirements.txt
+	uv venv --python python3 --clear mcp/.venv
+	uv pip install --python mcp/.venv/bin/python3 -r mcp/requirements.txt -q
+	@touch mcp/.venv/.installed
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
