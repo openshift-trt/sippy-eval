@@ -238,6 +238,17 @@ async def regression_cache(
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True if *pid* exists (even if we lack permission to signal it)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def _proc_cmdline(pid_dir: Path) -> str:
     raw = (pid_dir / "cmdline").read_bytes()
     return raw.replace(b"\0", b" ").decode(errors="replace")
@@ -420,8 +431,15 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_ready(host_hint, 120, pids=existing)
+            if err:
+                tail = _tail_file(log_path, 40)
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not ready: {err}. "
+                    f"log: {log_path}\n--- tail ---\n{tail}"
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -546,14 +564,26 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
-    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+async def _wait_for_ready(
+    url: str,
+    timeout: int,
+    proc: subprocess.Popen | None = None,
+    pids: list[int] | None = None,
+) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None.
+
+    Optionally checks that the backing process is still alive via *proc* (Popen) or *pids*.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                return f"process exited (exit {code}) while waiting for readiness"
+        elif pids:
+            if not any(_pid_alive(p) for p in pids):
+                return "process(es) exited while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None

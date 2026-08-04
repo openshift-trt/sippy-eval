@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,11 +12,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,51 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(4_000_000) is False
+
+    def test_permission_error_counts_as_alive(self):
+        with mock.patch("server.os.kill", side_effect=PermissionError):
+            assert _pid_alive(1) is True
+
+
+class TestWaitForReadyWithPids:
+    def test_returns_none_when_url_responds(self):
+        fake_response = mock.MagicMock()
+        with mock.patch("server.urllib.request.urlopen", return_value=fake_response):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", timeout=5, pids=[os.getpid()])
+            )
+        assert result is None
+
+    def test_returns_error_when_all_pids_dead(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:1", timeout=5, pids=[4_000_000])
+        )
+        assert "exited" in result
+
+    def test_returns_timeout_when_url_never_responds(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:1", timeout=2, pids=[os.getpid()])
+            )
+        assert "not ready after" in result
+
+    def test_proc_exit_still_detected(self):
+        proc = mock.MagicMock()
+        proc.poll.return_value = 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:1", timeout=5, proc=proc)
+            )
+        assert "process exited" in result
