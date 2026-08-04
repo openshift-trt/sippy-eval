@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +146,75 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+func TestSippyNgTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	tests := []struct {
+		name             string
+		path             string
+		expectedStatus   int
+		expectedRedirect string
+	}{
+		{
+			name:             "no trailing slash redirects",
+			path:             "/sippy-ng",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedRedirect: "/sippy-ng/",
+		},
+		{
+			name:             "root redirects",
+			path:             "/",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedRedirect: "/sippy-ng/",
+		},
+		{
+			name:           "trailing slash serves directly",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "sub-path serves directly",
+			path:           "/sippy-ng/component_readiness",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "unknown path returns 404",
+			path:           "/unknown",
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			if rr.Code != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, rr.Code)
+			}
+			if tc.expectedRedirect != "" {
+				location := rr.Header().Get("Location")
+				if location != tc.expectedRedirect {
+					t.Fatalf("expected redirect to %q, got %q", tc.expectedRedirect, location)
+				}
+			}
+		})
 	}
 }
