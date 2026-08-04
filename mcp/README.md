@@ -67,6 +67,21 @@ Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
 - `sippy-dev-app` (backend + frontend)
 - `sippy-dev-tests` (order: `CI=true make lint` → `make test` → `make e2e`)
 
+## Testing
+
+Unit tests for server helper functions live in **`test_server.py`** and run as part of `make test`. You can also run them standalone:
+
+```bash
+make mcp-test
+```
+
+Or directly with `pytest`:
+
+```bash
+cd mcp
+.venv/bin/pytest test_server.py -v
+```
+
 ## Changing the server
 
 After editing **`server.py`**, restart the **sippy-dev** MCP server (or reload the editor) so tool lists stay in sync.
