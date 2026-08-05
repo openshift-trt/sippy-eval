@@ -33,7 +33,7 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+test: builddir npm mcp-venv
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -42,6 +42,7 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	cd mcp; .venv/bin/pytest test_server.py -v
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
@@ -57,6 +58,18 @@ sippy-ng/node_modules/.package-lock.json: sippy-ng/package-lock.json
 	npm config set fetch-retry-mintimeout 20000
 	npm config set fetch-retry-maxtimeout 120000
 	cd sippy-ng; npm ci --no-audit --ignore-scripts
+
+mcp-venv: mcp/.venv/.requirements-installed
+
+mcp/.venv/.requirements-installed: mcp/requirements.txt
+	python3 -m venv mcp/.venv
+	mcp/.venv/bin/pip install --upgrade pip -q
+	mcp/.venv/bin/pip install -r mcp/requirements.txt -q
+	@touch $@
+
+.PHONY: test-mcp
+test-mcp: mcp-venv
+	cd mcp; .venv/bin/pytest test_server.py -v
 
 clean:
 	rm -f sippy
