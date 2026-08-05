@@ -149,10 +149,15 @@ export default function TestDetailsReport(props) {
   // http://localhost:3000/sippy-ng/ to http://localhost:8080/api/
   // This hack allows us to keep the param generation logic in one place. (server side)
   const currentUrl = window.location.href
-  const sippyNgIndex = currentUrl.indexOf('/sippy-ng/')
+  let sippyNgIndex = currentUrl.indexOf('/sippy-ng/')
+  let prefixLen = 10 // length of '/sippy-ng/'
+  if (sippyNgIndex === -1) {
+    sippyNgIndex = currentUrl.indexOf('/sippy-ng')
+    prefixLen = 9 // length of '/sippy-ng'
+  }
   let testDetailsApiCall
   if (sippyNgIndex !== -1) {
-    const pathAfterSippyNg = currentUrl.substring(sippyNgIndex + 10) // +10 to skip '/sippy-ng/'
+    const pathAfterSippyNg = currentUrl.substring(sippyNgIndex + prefixLen)
     // We have to format the url to RFC3339Time in case the date picker has been used to update report params
     testDetailsApiCall = makeRFC3339Time(getAPIUrl(pathAfterSippyNg))
   } else {
