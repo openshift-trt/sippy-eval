@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,8 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,52 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**30) is False
+
+
+class TestPollUrl:
+    def test_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=5))
+            assert result is None
+
+    def test_success_after_retries(self):
+        call_count = 0
+
+        def urlopen_eventually(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=urlopen_eventually):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=10))
+            assert result is None
+            assert call_count >= 3
+
+    def test_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=2))
+            assert "not ready after 2s" in result
+
+    def test_process_exit_detected(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(
+                _poll_url(
+                    "http://localhost:8080",
+                    timeout=30,
+                    alive_check=lambda: False,
+                )
+            )
+            assert "process exited" in result
