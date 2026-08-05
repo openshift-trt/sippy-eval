@@ -111,6 +111,57 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	}
 }
 
+func TestSippyNGRedirectWithoutTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name             string
+		path             string
+		query            string
+		expectedStatus   int
+		expectedLocation string
+	}{
+		{
+			name:             "bare path redirects",
+			path:             "/sippy-ng",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:             "bare path with query string preserves params",
+			path:             "/sippy-ng",
+			query:            "tab=overview&release=4.19",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/?tab=overview&release=4.19",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				target := "/sippy-ng/"
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+			})
+
+			url := tc.path
+			if tc.query != "" {
+				url += "?" + tc.query
+			}
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tc.expectedStatus {
+				t.Errorf("expected status %d, got %d", tc.expectedStatus, rr.Code)
+			}
+			if loc := rr.Header().Get("Location"); loc != tc.expectedLocation {
+				t.Errorf("expected Location %q, got %q", tc.expectedLocation, loc)
+			}
+		})
+	}
+}
+
 func TestEncodeDefaultHighRisk(t *testing.T) {
 	result := apitype.ProwJobRunRiskAnalysis{
 		OverallRisk: apitype.JobFailureRisk{
