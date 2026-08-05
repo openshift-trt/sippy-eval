@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -7,10 +8,12 @@ import pytest
 
 from server import (
     REPO_ROOT,
+    _check_ready,
     _data_mode,
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,41 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class TestCheckReady:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _check_ready("http://localhost:9999", timeout=5, pids=[os.getpid()])
+            )
+        assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _check_ready("http://localhost:9999", timeout=2, pids=[os.getpid()])
+            )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_returns_error_when_pids_die(self):
+        dead_pid = 2**22 - 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _check_ready("http://localhost:9999", timeout=30, pids=[dead_pid])
+            )
+        assert result is not None
+        assert "exited" in result

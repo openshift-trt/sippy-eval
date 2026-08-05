@@ -238,6 +238,14 @@ async def regression_cache(
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def _proc_cmdline(pid_dir: Path) -> str:
     raw = (pid_dir / "cmdline").read_bytes()
     return raw.replace(b"\0", b" ").decode(errors="replace")
@@ -420,6 +428,12 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _check_ready(host_hint, 120, existing)
+            if err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not ready: {err}. "
+                    f"Listen: {host_hint} log: {log_path}. Call with restart=True to restart."
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -544,6 +558,24 @@ async def sippy_ng_start(
         f"sippy_ng_start started and ready (pid {pid_or_err}). URL: http://127.0.0.1:3000/sippy-ng "
         f"log: {log_path}"
     )
+
+
+async def _check_ready(url: str, timeout: int, pids: list[int]) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse, checking *pids* are alive.
+
+    Returns an error string or ``None`` on success.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if not any(_pid_alive(p) for p in pids):
+            return "process(es) exited while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
 
 
 async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
