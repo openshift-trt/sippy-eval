@@ -2241,6 +2241,11 @@ func (s *Server) Serve() {
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
+	// StrictSlash has no effect on PathPrefix routes, so handle the bare path explicitly.
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+	})
+
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
 	// goes to index.html
 	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
