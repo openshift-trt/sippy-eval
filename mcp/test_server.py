@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,55 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    @pytest.mark.asyncio
+    async def test_returns_none_on_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = await _wait_for_ready("http://localhost:8080/api", timeout=5)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = await _wait_for_ready("http://localhost:8080/api", timeout=1)
+            assert result is not None
+            assert "not ready after" in result
+
+    @pytest.mark.asyncio
+    async def test_retries_until_success(self):
+        call_count = 0
+
+        def urlopen_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("refused")
+            return mock.MagicMock()
+
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=urlopen_side_effect
+        ):
+            result = await _wait_for_ready("http://localhost:8080/api", timeout=10)
+            assert result is None
+            assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_detects_process_exit(self):
+        proc = mock.MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = 1
+        result = await _wait_for_ready("http://localhost:8080/api", timeout=5, proc=proc)
+        assert result is not None
+        assert "process exited" in result
+
+    @pytest.mark.asyncio
+    async def test_no_proc_skips_process_check(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = await _wait_for_ready("http://localhost:8080/api", timeout=1)
+            assert "not ready after" in result
+            assert "process exited" not in result
