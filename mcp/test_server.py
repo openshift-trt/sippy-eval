@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,8 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
+    _poll_url_ready,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,75 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class TestPollUrlReady:
+    def test_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _poll_url_ready("http://localhost:8080", timeout=5)
+            )
+            assert result is None
+
+    def test_timeout_returns_error(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _poll_url_ready("http://localhost:8080", timeout=2)
+            )
+            assert result is not None
+            assert "not ready after 2s" in result
+
+    def test_succeeds_after_retries(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionRefusedError("not yet")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _poll_url_ready("http://localhost:8080", timeout=10)
+            )
+            assert result is None
+            assert call_count == 3
+
+    def test_aborts_when_pids_gone(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _poll_url_ready(
+                    "http://localhost:8080", timeout=30, pids=[2**22 - 1]
+                )
+            )
+            assert result is not None
+            assert "exited" in result
+
+    def test_pids_alive_keeps_polling(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ConnectionRefusedError("not yet")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _poll_url_ready(
+                    "http://localhost:8080", timeout=10, pids=[os.getpid()]
+                )
+            )
+            assert result is None
