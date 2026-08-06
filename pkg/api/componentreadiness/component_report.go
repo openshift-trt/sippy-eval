@@ -585,6 +585,8 @@ func initTestAnalysisStruct(
 
 	// Default to required confidence from request, middleware may adjust later.
 	testStats.RequiredConfidence = reqOptions.AdvancedOption.Confidence
+	// Ensure Explanations is an empty slice rather than nil so it serializes as [] not null.
+	testStats.Explanations = []string{}
 
 	testStats.SampleStats = testdetails.ReleaseStats{
 		Release: reqOptions.SampleRelease.Name,
