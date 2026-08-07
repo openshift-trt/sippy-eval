@@ -1,7 +1,9 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
 from unittest import mock
+from urllib.error import URLError
 
 import pytest
 
@@ -11,6 +13,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,34 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPollUrl:
+    def test_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=5))
+        assert result is None
+
+    def test_timeout_when_url_never_responds(self):
+        with mock.patch(
+            "server.urllib.request.urlopen",
+            side_effect=URLError("Connection refused"),
+        ):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=2))
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_succeeds_after_initial_failures(self):
+        call_count = 0
+
+        def urlopen_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise URLError("Connection refused")
+            return mock.MagicMock()
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=urlopen_side_effect):
+            result = asyncio.run(_poll_url("http://localhost:8080", timeout=30))
+        assert result is None
+        assert call_count == 3
