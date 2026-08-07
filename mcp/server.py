@@ -420,8 +420,15 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _poll_url(host_hint, timeout=120)
+            if err:
+                return (
+                    f"sippy_serve already running (pid(s) {pids}) but API is not responding. "
+                    f"Listen: {host_hint} log: {log_path}. "
+                    f"The process may still be compiling. Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -519,9 +526,17 @@ async def sippy_ng_start(
     if existing:
         if not restart:
             pids = ", ".join(str(p) for p in existing)
+            ng_url = "http://127.0.0.1:3000/sippy-ng"
+            err = await _poll_url(ng_url, timeout=120)
+            if err:
+                return (
+                    f"sippy_ng_start already running (pid(s) {pids}) but not responding. "
+                    f"Typical URL: {ng_url} log: {log_path}. "
+                    f"Call with restart=True to restart."
+                )
             return (
-                f"sippy_ng_start already running (pid(s) {pids}). "
-                f"Typical URL: http://127.0.0.1:3000/sippy-ng log: {log_path}. "
+                f"sippy_ng_start already running and ready (pid(s) {pids}). "
+                f"Typical URL: {ng_url} log: {log_path}. "
                 f"Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -546,8 +561,21 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+async def _poll_url(url: str, timeout: int) -> str | None:
     """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
+async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+    """Poll *url* until it responds, *proc* exits, or *timeout* seconds elapse."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
