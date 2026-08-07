@@ -59,6 +59,21 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 `sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
 
+## Testing
+
+Unit tests live in **`test_server.py`** and run via pytest. They are included in `make test` alongside Go and JavaScript tests:
+
+```bash
+make test-mcp        # MCP tests only
+make test            # all tests (Go + JS + MCP)
+```
+
+To run pytest directly against an existing venv:
+
+```bash
+cd mcp && .venv/bin/python -m pytest test_server.py -v
+```
+
 ## Cursor skills
 
 Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
