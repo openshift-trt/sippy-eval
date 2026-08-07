@@ -33,7 +33,7 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+test: builddir npm test-mcp
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -49,6 +49,15 @@ lint: builddir npm
 	# See https://github.com/facebook/create-react-app/issues/11174 about
 	# why we only audit production deps:
 	cd sippy-ng; npm audit --omit=dev
+
+mcp/.venv/.installed: mcp/requirements.txt
+	test -d mcp/.venv || uv venv mcp/.venv
+	VIRTUAL_ENV=mcp/.venv uv pip install -r mcp/requirements.txt -q
+	touch $@
+
+.PHONY: test-mcp
+test-mcp: mcp/.venv/.installed
+	cd mcp && .venv/bin/python -m pytest test_server.py -v
 
 npm: sippy-ng/node_modules/.package-lock.json
 
