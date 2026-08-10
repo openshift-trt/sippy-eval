@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -7,10 +8,12 @@ import pytest
 
 from server import (
     REPO_ROOT,
+    _check_url_ready,
     _data_mode,
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,52 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_own_pid_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**30) is False
+
+
+class TestCheckUrlReady:
+    def test_returns_none_on_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _check_url_ready("http://127.0.0.1:8080", [os.getpid()], timeout=5)
+            )
+        assert result is None
+
+    def test_returns_error_when_process_exits(self):
+        with mock.patch("server._pid_alive", return_value=False):
+            result = asyncio.run(
+                _check_url_ready("http://127.0.0.1:8080", [99999], timeout=5)
+            )
+        assert result == "process exited while waiting for readiness"
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _check_url_ready("http://127.0.0.1:8080", [os.getpid()], timeout=2)
+            )
+        assert "not ready after 2s" in result
+
+    def test_succeeds_after_initial_failures(self):
+        calls = {"count": 0}
+
+        def _urlopen(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise ConnectionRefusedError
+            return mock.MagicMock()
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _check_url_ready("http://127.0.0.1:8080", [os.getpid()], timeout=10)
+            )
+        assert result is None
+        assert calls["count"] == 3
