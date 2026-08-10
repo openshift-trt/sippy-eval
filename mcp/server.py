@@ -238,6 +238,17 @@ async def regression_cache(
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    """Check whether a process with *pid* exists."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def _proc_cmdline(pid_dir: Path) -> str:
     raw = (pid_dir / "cmdline").read_bytes()
     return raw.replace(b"\0", b" ").decode(errors="replace")
@@ -420,6 +431,12 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_url(host_hint, 120, existing)
+            if err:
+                return (
+                    f"sippy_serve process found (pid(s) {pids}) but {err}. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -554,6 +571,25 @@ async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str
         code = proc.poll()
         if code is not None:
             return f"process exited (exit {code}) while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
+async def _wait_for_url(url: str, timeout: int, pids: list[int]) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    Like ``_wait_for_ready`` but takes a list of existing PIDs instead of a
+    ``subprocess.Popen``, so it can verify readiness of processes we didn't spawn.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if not any(_pid_alive(p) for p in pids):
+            return "backend process exited while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None
