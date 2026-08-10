@@ -344,6 +344,37 @@ def _pids_sippy_ng_dev() -> list[int]:
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+async def _poll_url(url: str, timeout: int, pids: list[int] | None = None) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    If *pids* are given, returns early when none of them are alive.
+    Returns an error string or None on success.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if pids is not None:
+            alive = [p for p in pids if _pid_alive(p)]
+            if not alive:
+                return "all sippy_serve processes exited while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
 async def _stop_pids(pids: list[int]) -> str:
     """Send SIGTERM then SIGKILL to each PID. Returns a summary."""
     for pid in pids:
@@ -419,9 +450,17 @@ async def sippy_serve(
     if existing:
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+            ready_url = f"{host_hint}/api/releases"
             pids = ", ".join(str(p) for p in existing)
+            err = await _poll_url(ready_url, 120, existing)
+            if err:
+                tail = _tail_file(log_path, 40)
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not responding: "
+                    f"{err}. Listen: {host_hint} log: {log_path}\n--- tail ---\n{tail}"
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -468,9 +507,10 @@ async def sippy_serve(
         args.extend(["--config", str(cfg)])
 
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+    ready_url = f"{host_hint}/api/releases"
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=ready_url,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
