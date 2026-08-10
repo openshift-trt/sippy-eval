@@ -19,6 +19,29 @@ import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
 
+export function filterRegressionsByVariants(regressions, variantFilters) {
+  let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
+
+  if (variantFilters.length === 0) return filtered
+
+  return filtered.filter((regression) => {
+    const variantValues = (regression.variants || []).map(
+      (v) => parseVariantName(v).name
+    )
+
+    return variantFilters.every((filter) => {
+      const filterValue = parseVariantName(filter.value).name
+      const hasMatch = variantValues.some(
+        (v) => v.toLowerCase() === filterValue.toLowerCase()
+      )
+      if (filter.not) {
+        return !hasMatch
+      }
+      return hasMatch
+    })
+  })
+}
+
 export default function TestRegressionsTable({
   release,
   testName,
@@ -62,27 +85,10 @@ export default function TestRegressionsTable({
     return filterModel.items.filter((f) => f.columnField === 'variants')
   }, [filterModel])
 
-  const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
-
-    if (variantFilters.length === 0) return filtered
-
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
-  }, [regressions, variantFilters])
+  const filteredRegressions = useMemo(
+    () => filterRegressionsByVariants(regressions, variantFilters),
+    [regressions, variantFilters]
+  )
 
   if (!isLoaded) {
     return <p>Loading...</p>
