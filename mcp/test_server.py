@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 
 from server import (
     REPO_ROOT,
+    _any_pid_alive,
     _data_mode,
     _default_database_dsn,
     _default_redis_url,
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_url,
 )
 
 
@@ -297,3 +300,60 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestAnyPidAlive:
+    def test_current_process_is_alive(self):
+        assert _any_pid_alive([os.getpid()]) is True
+
+    def test_nonexistent_pid(self):
+        assert _any_pid_alive([2**22 - 1]) is False
+
+    def test_empty_list(self):
+        assert _any_pid_alive([]) is False
+
+    def test_mixed_alive_and_dead(self):
+        assert _any_pid_alive([2**22 - 1, os.getpid()]) is True
+
+
+class TestWaitForUrl:
+    def test_returns_none_on_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_wait_for_url("http://localhost:8080", timeout=5))
+            assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError
+        ):
+            result = asyncio.run(_wait_for_url("http://localhost:8080", timeout=2))
+            assert result is not None
+            assert "not ready after" in result
+
+    def test_short_circuits_when_alive_check_fails(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError
+        ):
+            result = asyncio.run(
+                _wait_for_url(
+                    "http://localhost:8080",
+                    timeout=60,
+                    alive_check=lambda: False,
+                )
+            )
+            assert result is not None
+            assert "process exited" in result
+
+    def test_retries_until_success(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(_wait_for_url("http://localhost:8080", timeout=10))
+            assert result is None
+            assert call_count == 3
