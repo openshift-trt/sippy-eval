@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,11 +12,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_url,
 )
 
 
@@ -297,3 +300,32 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_own_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class TestWaitForUrl:
+    def test_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_url("http://127.0.0.1:8080", 5, [os.getpid()])
+            )
+        assert result is None
+
+    def test_process_exits_returns_error(self):
+        result = asyncio.run(
+            _wait_for_url("http://127.0.0.1:59999", 5, [2**22 - 1])
+        )
+        assert "process exited" in result
+
+    def test_timeout_returns_error(self):
+        result = asyncio.run(
+            _wait_for_url("http://127.0.0.1:59999", 1, [os.getpid()])
+        )
+        assert "not ready after" in result
