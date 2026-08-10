@@ -2,11 +2,14 @@ package sippyserver
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +148,79 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+func TestSippyNGTrailingSlashRedirect(t *testing.T) {
+	fakeFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html>sippy</html>")},
+	}
+	var sippyNG fs.FS = fakeFS
+
+	router := mux.NewRouter()
+
+	router.PathPrefix("/sippy-ng").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(sippyNG))).ServeHTTP(w, r)
+	})
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	tests := []struct {
+		name             string
+		path             string
+		expectedCode     int
+		expectedLocation string
+	}{
+		{
+			name:             "no trailing slash redirects",
+			path:             "/sippy-ng",
+			expectedCode:     http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:             "no trailing slash with query string preserves query",
+			path:             "/sippy-ng?release=4.18",
+			expectedCode:     http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/?release=4.18",
+		},
+		{
+			name:         "trailing slash serves content",
+			path:         "/sippy-ng/",
+			expectedCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.expectedCode {
+				t.Fatalf("expected status %d, got %d", tc.expectedCode, resp.StatusCode)
+			}
+
+			if tc.expectedLocation != "" {
+				loc := resp.Header.Get("Location")
+				if loc != tc.expectedLocation {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLocation, loc)
+				}
+			}
+		})
 	}
 }
