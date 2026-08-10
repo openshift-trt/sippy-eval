@@ -176,7 +176,18 @@ class TestResolveBigqueryCreds:
 
 class TestDataMode:
     def _patch_dotenv(self, vals):
-        return mock.patch("server.dotenv_values", return_value=vals)
+        mock_env = mock.patch("server.dotenv_values", return_value=vals)
+        mock_file = mock.patch("server._DEVCONTAINER_ENV")
+        class _combined:
+            def __enter__(self_ctx):
+                self_ctx._env = mock_env.__enter__()
+                p = mock_file.__enter__()
+                p.is_file.return_value = True
+                return self_ctx._env
+            def __exit__(self_ctx, *exc):
+                mock_file.__exit__(*exc)
+                mock_env.__exit__(*exc)
+        return _combined()
 
     def test_default_is_seed(self):
         with self._patch_dotenv({}):
