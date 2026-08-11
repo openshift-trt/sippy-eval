@@ -407,6 +407,21 @@ export function parseVariantName(variantName) {
   }
 }
 
+export function matchesVariantFilters(variants, variantFilters) {
+  return variantFilters.every((filter) => {
+    const filterVal = filter.value.toLowerCase()
+    const hasMatch = variants.some(
+      (v) =>
+        v.toLowerCase() === filterVal ||
+        parseVariantName(v).name.toLowerCase() === filterVal
+    )
+    if (filter.not) {
+      return !hasMatch
+    }
+    return hasMatch
+  })
+}
+
 export function findFirstNonGARelease(releases) {
   if (
     releases === undefined ||

@@ -1,5 +1,11 @@
 import { Link } from 'react-router-dom'
 import {
+  matchesVariantFilters,
+  parseVariantName,
+  relativeTime,
+  safeEncodeURIComponent,
+} from '../helpers'
+import {
   Paper,
   Table,
   TableBody,
@@ -10,11 +16,6 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import {
-  parseVariantName,
-  relativeTime,
-  safeEncodeURIComponent,
-} from '../helpers'
 import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
@@ -67,21 +68,9 @@ export default function TestRegressionsTable({
 
     if (variantFilters.length === 0) return filtered
 
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
+    return filtered.filter((regression) =>
+      matchesVariantFilters(regression.variants || [], variantFilters)
+    )
   }, [regressions, variantFilters])
 
   if (!isLoaded) {
