@@ -420,6 +420,23 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+
+            def _any_alive() -> bool:
+                for pid in existing:
+                    try:
+                        os.kill(pid, 0)
+                        return True
+                    except ProcessLookupError:
+                        continue
+                return False
+
+            err = await _poll_url(host_hint, 120, _any_alive)
+            if err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not ready: {err}. "
+                    f"log: {log_path}. Call with restart=True to restart, "
+                    f"or wait for the server to finish starting."
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -519,6 +536,23 @@ async def sippy_ng_start(
     if existing:
         if not restart:
             pids = ", ".join(str(p) for p in existing)
+
+            def _any_alive() -> bool:
+                for pid in existing:
+                    try:
+                        os.kill(pid, 0)
+                        return True
+                    except ProcessLookupError:
+                        continue
+                return False
+
+            err = await _poll_url("http://127.0.0.1:3000/sippy-ng", 120, _any_alive)
+            if err:
+                return (
+                    f"sippy_ng_start process detected (pid(s) {pids}) but not ready: {err}. "
+                    f"log: {log_path}. Call with restart=True to restart, "
+                    f"or wait for the dev server to finish starting."
+                )
             return (
                 f"sippy_ng_start already running (pid(s) {pids}). "
                 f"Typical URL: http://127.0.0.1:3000/sippy-ng log: {log_path}. "
@@ -546,20 +580,40 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
-    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+async def _poll_url(
+    url: str,
+    timeout: int,
+    alive_check: Callable[[], bool] | None = None,
+) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    *alive_check*, when provided, is called each iteration; an early error is
+    returned when it returns ``False`` (e.g. the backing process exited).
+
+    Returns ``None`` on success or an error string on failure.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        if alive_check is not None and not alive_check():
+            return "process exited while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None
         except Exception:
             await asyncio.sleep(1)
     return f"not ready after {timeout}s (checked {url})"
+
+
+async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+    def _alive() -> bool:
+        return proc.poll() is None
+
+    err = await _poll_url(url, timeout, _alive)
+    if err and err.startswith("process exited"):
+        return f"process exited (exit {proc.poll()}) while waiting for readiness"
+    return err
 
 
 async def _spawn_background(
