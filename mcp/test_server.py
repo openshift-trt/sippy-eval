@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +299,58 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPollUrl:
+    @pytest.mark.asyncio
+    async def test_returns_none_on_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = await _poll_url("http://localhost:8080", timeout=5)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = await _poll_url("http://localhost:8080", timeout=2)
+            assert result is not None
+            assert "not ready after 2s" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_process_exits(self):
+        call_count = 0
+
+        def _dying_process() -> bool:
+            nonlocal call_count
+            call_count += 1
+            return call_count < 2
+
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = await _poll_url("http://localhost:8080", timeout=30, alive_check=_dying_process)
+            assert result is not None
+            assert "process exited" in result
+
+    @pytest.mark.asyncio
+    async def test_succeeds_after_initial_failures(self):
+        attempt = 0
+
+        def _urlopen_eventually(*_args, **_kwargs):
+            nonlocal attempt
+            attempt += 1
+            if attempt < 3:
+                raise ConnectionRefusedError("not yet")
+            return mock.MagicMock()
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen_eventually):
+            result = await _poll_url("http://localhost:8080", timeout=30)
+            assert result is None
+            assert attempt == 3
+
+    @pytest.mark.asyncio
+    async def test_alive_check_not_called_when_omitted(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = await _poll_url("http://localhost:8080", timeout=5, alive_check=None)
+            assert result is None
