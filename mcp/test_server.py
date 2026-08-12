@@ -176,7 +176,13 @@ class TestResolveBigqueryCreds:
 
 class TestDataMode:
     def _patch_dotenv(self, vals):
-        return mock.patch("server.dotenv_values", return_value=vals)
+        mock_path = mock.MagicMock()
+        mock_path.is_file.return_value = True
+        return mock.patch.multiple(
+            "server",
+            _DEVCONTAINER_ENV=mock_path,
+            dotenv_values=mock.MagicMock(return_value=vals),
+        )
 
     def test_default_is_seed(self):
         with self._patch_dotenv({}):
