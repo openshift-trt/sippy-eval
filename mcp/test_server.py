@@ -1,5 +1,9 @@
+import asyncio
+import http.server
 import os
+import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +20,8 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
+    sippy_serve,
 )
 
 
@@ -297,3 +303,101 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+def _free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class _OKHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestWaitForReady:
+    def test_ready_immediately_with_pid(self):
+        port = _free_port()
+        srv = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            result = asyncio.run(
+                _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5, pid=os.getpid())
+            )
+            assert result is None
+        finally:
+            srv.shutdown()
+
+    def test_pid_exits_returns_error(self):
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        dead_pid = proc.pid
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=5, pid=dead_pid)
+        )
+        assert result is not None
+        assert "exited" in result
+
+    def test_timeout_returns_error(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=2, pid=os.getpid())
+        )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_proc_poll_still_works(self):
+        port = _free_port()
+        srv = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        proc = subprocess.Popen(["sleep", "30"])
+        try:
+            result = asyncio.run(
+                _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5, proc=proc)
+            )
+            assert result is None
+        finally:
+            proc.terminate()
+            proc.wait()
+            srv.shutdown()
+
+
+class TestSippyServeReadinessCheck:
+    """Test that sippy_serve polls HTTP readiness when a process is already running."""
+
+    def test_already_running_polls_readiness(self):
+        port = _free_port()
+        srv = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with mock.patch("server._pids_sippy_serve", return_value=[os.getpid()]):
+                with mock.patch("server._data_mode", return_value="seed"):
+                    result = asyncio.run(sippy_serve(listen=f":{port}"))
+            assert "already running and ready" in result
+        finally:
+            srv.shutdown()
+
+    def test_already_running_not_ready_reports_error(self):
+        with mock.patch("server._pids_sippy_serve", return_value=[os.getpid()]):
+            with mock.patch("server._data_mode", return_value="seed"):
+                with mock.patch("server._wait_for_ready", return_value="not ready after 120s (checked http://127.0.0.1:8080)"):
+                    result = asyncio.run(sippy_serve())
+        assert "process detected" in result
+        assert "not ready" in result
+
+    def test_already_running_process_dies_reports_error(self):
+        with mock.patch("server._pids_sippy_serve", return_value=[os.getpid()]):
+            with mock.patch("server._data_mode", return_value="seed"):
+                with mock.patch("server._wait_for_ready", return_value="process (pid 12345) exited while waiting for readiness"):
+                    result = asyncio.run(sippy_serve())
+        assert "process detected" in result
+        assert "exited" in result
