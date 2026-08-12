@@ -33,7 +33,7 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+test: builddir npm test-mcp
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -57,6 +57,19 @@ sippy-ng/node_modules/.package-lock.json: sippy-ng/package-lock.json
 	npm config set fetch-retry-mintimeout 20000
 	npm config set fetch-retry-maxtimeout 120000
 	cd sippy-ng; npm ci --no-audit --ignore-scripts
+
+mcp/.venv/.installed: mcp/requirements.txt
+	python3 -m venv mcp/.venv
+	mcp/.venv/bin/pip install --upgrade pip -q
+	mcp/.venv/bin/pip install -r mcp/requirements.txt -q
+	touch mcp/.venv/.installed
+
+test-mcp: mcp/.venv/.installed
+ifeq ($(ARTIFACT_DIR),)
+	cd mcp && .venv/bin/python -m pytest test_server.py -v --junitxml=../junit-mcp.xml
+else
+	cd mcp && .venv/bin/python -m pytest test_server.py -v --junitxml=$(ARTIFACT_DIR)/junit-mcp.xml
+endif
 
 clean:
 	rm -f sippy
