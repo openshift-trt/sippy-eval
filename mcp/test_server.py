@@ -1,5 +1,7 @@
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -7,10 +9,12 @@ import pytest
 
 from server import (
     REPO_ROOT,
+    _check_url,
     _data_mode,
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +301,50 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+@pytest.fixture()
+def _http_server():
+    """Start an ephemeral HTTP server that returns 200 on any path."""
+    handler = http.server.BaseHTTPRequestHandler
+    original_do_GET = getattr(handler, "do_GET", None)
+
+    def _do_get(self):
+        self.send_response(200)
+        self.end_headers()
+
+    handler.do_GET = _do_get
+    handler.log_message = lambda *_a, **_kw: None  # silence logs
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield port
+    srv.shutdown()
+    if original_do_GET is not None:
+        handler.do_GET = original_do_GET
+    else:
+        del handler.do_GET
+
+
+class TestCheckUrl:
+    @pytest.mark.anyio
+    async def test_returns_true_for_responding_server(self, _http_server):
+        assert await _check_url(f"http://127.0.0.1:{_http_server}") is True
+
+    @pytest.mark.anyio
+    async def test_returns_false_for_non_responding_server(self):
+        assert await _check_url("http://127.0.0.1:1") is False
+
+
+class TestPollUrl:
+    @pytest.mark.anyio
+    async def test_returns_none_when_server_responds(self, _http_server):
+        result = await _poll_url(f"http://127.0.0.1:{_http_server}", timeout=5)
+        assert result is None
+
+    @pytest.mark.anyio
+    async def test_returns_error_on_timeout(self):
+        result = await _poll_url("http://127.0.0.1:1", timeout=2)
+        assert result is not None
+        assert "not ready after" in result
