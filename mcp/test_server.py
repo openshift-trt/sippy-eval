@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,11 +12,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_is_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,41 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidIsAlive:
+    def test_own_pid(self):
+        assert _pid_is_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_is_alive(2**22 - 1) is False
+
+
+class TestWaitForReadyWithPids:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", timeout=5, pids=[os.getpid()])
+            )
+        assert result is None
+
+    def test_returns_error_when_url_never_responds(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", timeout=2, pids=[os.getpid()])
+            )
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_returns_error_when_pids_exit(self):
+        dead_pid = 2**22 - 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", timeout=30, pids=[dead_pid])
+            )
+        assert result is not None
+        assert "exited" in result
