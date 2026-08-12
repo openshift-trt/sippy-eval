@@ -407,6 +407,13 @@ export function parseVariantName(variantName) {
   }
 }
 
+export function variantMatchesFilter(variant, filterValue) {
+  const full = variant.toLowerCase()
+  const name = parseVariantName(variant).name.toLowerCase()
+  const val = filterValue.toLowerCase()
+  return full === val || name === val
+}
+
 export function findFirstNonGARelease(releases) {
   if (
     releases === undefined ||

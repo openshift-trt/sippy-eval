@@ -14,6 +14,7 @@ import {
   parseVariantName,
   relativeTime,
   safeEncodeURIComponent,
+  variantMatchesFilter,
 } from '../helpers'
 import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
@@ -68,13 +69,9 @@ export default function TestRegressionsTable({
     if (variantFilters.length === 0) return filtered
 
     return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
       return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
+        const hasMatch = (regression.variants || []).some((v) =>
+          variantMatchesFilter(v, filter.value)
         )
         if (filter.not) {
           return !hasMatch
