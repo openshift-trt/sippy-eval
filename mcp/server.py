@@ -344,6 +344,33 @@ def _pids_sippy_ng_dev() -> list[int]:
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+async def _wait_for_url(url: str, timeout: int, pids: list[int] | None = None) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    If *pids* are given, return early when none are alive.
+    Returns an error string or ``None`` on success.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if pids and not any(_pid_alive(p) for p in pids):
+            return "all processes exited while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
 async def _stop_pids(pids: list[int]) -> str:
     """Send SIGTERM then SIGKILL to each PID. Returns a summary."""
     for pid in pids:
@@ -420,8 +447,15 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_url(host_hint, 120, existing)
+            if err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API not responding: "
+                    f"{err}. Listen: {host_hint} log: {log_path}. "
+                    f"Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
