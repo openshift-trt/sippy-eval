@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +146,71 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+func TestSippyNGRedirectWithoutTrailingSlash(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("sippy-ng SPA"))
+	})
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedLoc    string
+	}{
+		{
+			name:           "no trailing slash redirects",
+			path:           "/sippy-ng",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "no trailing slash preserves query params",
+			path:           "/sippy-ng?view=main",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/?view=main",
+		},
+		{
+			name:           "trailing slash serves SPA",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "sub-path serves SPA",
+			path:           "/sippy-ng/component_readiness/main",
+			expectedStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, rec.Code)
+			}
+			if tc.expectedLoc != "" {
+				loc := rec.Header().Get("Location")
+				if loc != tc.expectedLoc {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLoc, loc)
+				}
+			}
+		})
 	}
 }
