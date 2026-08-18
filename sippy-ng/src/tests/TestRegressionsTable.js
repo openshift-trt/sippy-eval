@@ -19,6 +19,33 @@ import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
 
+export function filterRegressionsByVariants(regressions, variantFilters) {
+  if (variantFilters.length === 0) return regressions
+
+  return regressions.filter((regression) => {
+    const variants = (regression.variants || []).map((v) => v.toLowerCase())
+
+    return variantFilters.every((filter) => {
+      if (filter.operatorValue === 'is empty') {
+        const isEmpty = variants.length === 0
+        return filter.not ? !isEmpty : isEmpty
+      }
+
+      const filterVal = (filter.value || '').toLowerCase()
+      let hasMatch
+      if (filter.operatorValue === 'has entry containing') {
+        hasMatch = variants.some((v) => v.includes(filterVal))
+      } else {
+        hasMatch = variants.some((v) => v === filterVal)
+      }
+      if (filter.not) {
+        return !hasMatch
+      }
+      return hasMatch
+    })
+  })
+}
+
 export default function TestRegressionsTable({
   release,
   testName,
@@ -63,25 +90,8 @@ export default function TestRegressionsTable({
   }, [filterModel])
 
   const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
-
-    if (variantFilters.length === 0) return filtered
-
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
+    const active = regressions.filter((r) => !r.closed || !r.closed.Valid)
+    return filterRegressionsByVariants(active, variantFilters)
   }, [regressions, variantFilters])
 
   if (!isLoaded) {
