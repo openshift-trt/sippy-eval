@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_url,
 )
 
 
@@ -297,3 +299,56 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForUrl:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_url("http://localhost:8080", timeout=5)
+            )
+            assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_url("http://localhost:8080", timeout=2)
+            )
+            assert result is not None
+            assert "not ready after 2s" in result
+
+    def test_returns_error_when_pid_exits(self):
+        with mock.patch("server.urllib.request.urlopen", side_effect=ConnectionRefusedError):
+            with mock.patch("os.kill", side_effect=ProcessLookupError):
+                result = asyncio.run(
+                    _wait_for_url("http://localhost:8080", timeout=30, pid=99999)
+                )
+                assert result is not None
+                assert "process 99999 exited" in result
+
+    def test_succeeds_after_initial_failures(self):
+        call_count = 0
+
+        def urlopen_side_effect(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionRefusedError("not yet")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=urlopen_side_effect):
+            result = asyncio.run(
+                _wait_for_url("http://localhost:8080", timeout=30)
+            )
+            assert result is None
+            assert call_count == 3
+
+    def test_no_pid_check_when_pid_is_none(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            with mock.patch("os.kill") as mock_kill:
+                result = asyncio.run(
+                    _wait_for_url("http://localhost:8080", timeout=5, pid=None)
+                )
+                assert result is None
+                mock_kill.assert_not_called()
