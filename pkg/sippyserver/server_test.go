@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +146,79 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+func TestSippyNGRedirectWithoutTrailingSlash(t *testing.T) {
+	router := mux.NewRouter()
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	// Mirrors the catch-all in Server.Serve() that redirects /sippy-ng to /sippy-ng/
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	tests := []struct {
+		name             string
+		path             string
+		expectedStatus   int
+		expectedLocation string
+	}{
+		{
+			name:             "redirect without trailing slash",
+			path:             "/sippy-ng",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:             "redirect preserves query params",
+			path:             "/sippy-ng?release=4.19",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/?release=4.19",
+		},
+		{
+			name:           "trailing slash serves directly",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:             "root redirects to sippy-ng",
+			path:             "/",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:           "unknown path returns 404",
+			path:           "/unknown",
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			if rr.Code != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, rr.Code)
+			}
+			if tc.expectedLocation != "" {
+				loc := rr.Header().Get("Location")
+				if loc != tc.expectedLocation {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLocation, loc)
+				}
+			}
+		})
 	}
 }
