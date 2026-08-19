@@ -42,6 +42,21 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	$(MAKE) test-mcp
+
+mcp/.venv/.dev-deps: mcp/requirements.txt mcp/requirements-dev.txt
+	@if [ ! -x mcp/.venv/bin/python ]; then \
+		uv venv mcp/.venv; \
+	fi
+	uv pip install --python mcp/.venv/bin/python -r mcp/requirements.txt -r mcp/requirements-dev.txt -q
+	@touch $@
+
+test-mcp: mcp/.venv/.dev-deps
+ifeq ($(ARTIFACT_DIR),)
+	cd mcp && .venv/bin/python -m pytest test_server.py -v
+else
+	cd mcp && .venv/bin/python -m pytest test_server.py -v --junitxml=$(ARTIFACT_DIR)/junit_mcp.xml
+endif
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
