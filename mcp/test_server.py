@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +14,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +301,54 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class _OKHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestPollUrl:
+    def test_returns_none_when_url_responds(self):
+        server = http.server.HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = asyncio.run(_poll_url(f"http://127.0.0.1:{port}", timeout=5))
+            assert result is None
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_returns_error_when_url_unreachable(self):
+        result = asyncio.run(_poll_url("http://127.0.0.1:19999", timeout=2))
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_returns_none_when_url_becomes_available(self):
+        server = http.server.HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = server.server_address[1]
+        server.server_close()
+
+        async def _run():
+            async def _delayed_serve():
+                await asyncio.sleep(2)
+                s = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+                t = threading.Thread(target=s.serve_forever, daemon=True)
+                t.start()
+                return s
+
+            task = asyncio.create_task(_delayed_serve())
+            result = await _poll_url(f"http://127.0.0.1:{port}", timeout=10)
+            s = await task
+            s.shutdown()
+            s.server_close()
+            return result
+
+        result = asyncio.run(_run())
+        assert result is None
