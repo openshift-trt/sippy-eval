@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,11 +12,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,70 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid_is_not_alive(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+async def _noop_sleep(_seconds):
+    pass
+
+
+class TestWaitForReady:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080", timeout=5)
+            )
+        assert result is None
+
+    def test_returns_error_when_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionError("refused")
+        ):
+            with mock.patch("server.asyncio.sleep", _noop_sleep):
+                result = asyncio.run(
+                    _wait_for_ready("http://localhost:8080", timeout=2)
+                )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_returns_error_when_proc_exits(self):
+        proc = mock.MagicMock()
+        proc.poll.return_value = 1
+        result = asyncio.run(
+            _wait_for_ready("http://localhost:8080", timeout=5, proc=proc)
+        )
+        assert result is not None
+        assert "process exited" in result
+
+    def test_returns_error_when_all_pids_exit(self):
+        with mock.patch("server._pid_alive", return_value=False):
+            result = asyncio.run(
+                _wait_for_ready("http://localhost:8080", timeout=5, pids=[99999])
+            )
+        assert result is not None
+        assert "all processes exited" in result
+
+    def test_polls_until_url_responds_with_pids(self):
+        call_count = 0
+
+        def _urlopen_eventually(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen_eventually):
+            with mock.patch("server._pid_alive", return_value=True):
+                with mock.patch("server.asyncio.sleep", _noop_sleep):
+                    result = asyncio.run(
+                        _wait_for_ready("http://localhost:8080", timeout=30, pids=[12345])
+                    )
+        assert result is None
+        assert call_count >= 3
