@@ -431,6 +431,19 @@ export function findFirstNonGARelease(releases) {
   return firstNonGA
 }
 
+export function filterRegressionsByVariants(regressions, variantFilters) {
+  if (variantFilters.length === 0) return regressions
+  return regressions.filter((regression) => {
+    const variantValues = regression.variants || []
+    return variantFilters.every((filter) => {
+      const hasMatch = variantValues.some(
+        (v) => v.toLowerCase() === filter.value.toLowerCase()
+      )
+      return filter.not ? !hasMatch : hasMatch
+    })
+  })
+}
+
 // getTestStatus returns the status of a test represented by a test_stats object.
 export function getTestStatus(stats, flake, fail, success) {
   return stats.flake_count > 0

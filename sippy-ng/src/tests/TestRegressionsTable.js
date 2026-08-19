@@ -1,3 +1,9 @@
+import {
+  filterRegressionsByVariants,
+  parseVariantName,
+  relativeTime,
+  safeEncodeURIComponent,
+} from '../helpers'
 import { Link } from 'react-router-dom'
 import {
   Paper,
@@ -10,11 +16,6 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import {
-  parseVariantName,
-  relativeTime,
-  safeEncodeURIComponent,
-} from '../helpers'
 import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
@@ -63,25 +64,8 @@ export default function TestRegressionsTable({
   }, [filterModel])
 
   const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
-
-    if (variantFilters.length === 0) return filtered
-
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
+    const open = regressions.filter((r) => !r.closed || !r.closed.Valid)
+    return filterRegressionsByVariants(open, variantFilters)
   }, [regressions, variantFilters])
 
   if (!isLoaded) {
