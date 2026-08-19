@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +299,35 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def test_returns_none_when_url_responds(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(_wait_for_ready("http://localhost:8080", 5, os.getpid()))
+        assert result is None
+
+    def test_returns_error_when_pid_gone(self):
+        result = asyncio.run(_wait_for_ready("http://localhost:9999", 2, 2_000_000_000))
+        assert result is not None
+        assert "exited" in result
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch("server.urllib.request.urlopen", side_effect=ConnectionError):
+            result = asyncio.run(_wait_for_ready("http://localhost:9999", 2, os.getpid()))
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_retries_until_url_responds(self):
+        attempts = 0
+
+        def urlopen_side_effect(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise ConnectionError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=urlopen_side_effect):
+            result = asyncio.run(_wait_for_ready("http://localhost:8080", 10, os.getpid()))
+        assert result is None
+        assert attempts == 3
