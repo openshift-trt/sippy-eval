@@ -67,6 +67,16 @@ Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
 - `sippy-dev-app` (backend + frontend)
 - `sippy-dev-tests` (order: `CI=true make lint` → `make test` → `make e2e`)
 
+## Testing
+
+Unit tests live in **`mcp/test_server.py`** and run via pytest. They are included in the top-level **`make test`** target and can also be run independently:
+
+```bash
+make mcp-test
+```
+
+Test dependencies (pytest) are declared in **`mcp/dev-requirements.txt`**. The Makefile target handles venv creation and dependency installation automatically via `uv`.
+
 ## Changing the server
 
 After editing **`server.py`**, restart the **sippy-dev** MCP server (or reload the editor) so tool lists stay in sync.
