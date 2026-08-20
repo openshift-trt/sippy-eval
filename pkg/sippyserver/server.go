@@ -2242,7 +2242,8 @@ func (s *Server) Serve() {
 	router.StrictSlash(true)
 
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
-	// goes to index.html
+	// goes to index.html. The PathPrefix includes the trailing slash so that
+	// /sippy-ng (without slash) is handled by the catch-all redirect below.
 	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs := s.sippyNG
 		if r.URL.Path != "/sippy-ng/" {
@@ -2877,7 +2878,7 @@ func (s *Server) Serve() {
 		filePath := "static" + r.URL.Path
 		if _, err := s.static.Open(filePath); err != nil {
 			// File doesn't exist in static, redirect to sippy-ng
-			if r.URL.Path == "/" {
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
 				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
