@@ -1,5 +1,6 @@
 reviewers:
 approvers:
+- openshift-trt
 - deads2k
 - deepsm007
 - dgoodwin
