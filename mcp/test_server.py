@@ -1,5 +1,7 @@
+import asyncio
 import os
 import tempfile
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +18,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +300,62 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def test_returns_none_when_url_responds_immediately(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", 5, pid=os.getpid())
+            )
+        assert result is None
+
+    def test_returns_error_when_pid_exits(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:8080", 5, pid=999999999)
+        )
+        assert "exited" in result
+        assert "999999999" in result
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", 2, pid=os.getpid())
+            )
+        assert "not ready after 2s" in result
+
+    def test_succeeds_after_initial_failures(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise urllib.error.URLError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", 30, pid=os.getpid())
+            )
+        assert result is None
+        assert call_count == 3
+
+    def test_works_with_proc_parameter(self):
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_ready("http://127.0.0.1:8080", 5, proc=mock_proc)
+            )
+        assert result is None
+
+    def test_detects_proc_exit(self):
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = 1
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:8080", 5, proc=mock_proc)
+        )
+        assert "process exited (exit 1)" in result
