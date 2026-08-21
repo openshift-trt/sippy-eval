@@ -1,5 +1,9 @@
+import asyncio
+import http.server
 import os
+import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,11 +15,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +303,70 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class TestWaitForReady:
+    def _serve_once(self, port):
+        """Start a HTTP server on *port* that serves one request then shuts down."""
+        class _OKHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+            def log_message(self, *_args):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", port), _OKHandler)
+        srv.timeout = 5
+        srv.handle_request()
+        srv.server_close()
+
+    def test_returns_none_when_url_responds(self):
+        port = 19876
+        t = threading.Thread(target=self._serve_once, args=(port,), daemon=True)
+        t.start()
+        result = asyncio.run(
+            _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5)
+        )
+        assert result is None
+        t.join(timeout=2)
+
+    def test_returns_error_on_timeout(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19877", timeout=2)
+        )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_detects_dead_pids(self):
+        proc = subprocess.Popen(
+            ["true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait()
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19878", timeout=5, pids=[proc.pid])
+        )
+        assert result is not None
+        assert "process exited" in result
+
+    def test_detects_exited_proc(self):
+        proc = subprocess.Popen(
+            ["true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait()
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19879", timeout=5, proc=proc)
+        )
+        assert result is not None
+        assert "process exited" in result
