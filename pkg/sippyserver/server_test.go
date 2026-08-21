@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +109,59 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGWithoutTrailingSlashRedirects(t *testing.T) {
+	router := mux.NewRouter()
+
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+	})
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name         string
+		path         string
+		wantCode     int
+		wantLocation string
+	}{
+		{
+			name:         "without trailing slash redirects",
+			path:         "/sippy-ng",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:     "with trailing slash serves directly",
+			path:     "/sippy-ng/",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "subpath serves directly",
+			path:     "/sippy-ng/component_readiness",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d", rec.Code, tc.wantCode)
+			}
+			if tc.wantLocation != "" {
+				got := rec.Header().Get("Location")
+				if got != tc.wantLocation {
+					t.Fatalf("got Location %q, want %q", got, tc.wantLocation)
+				}
+			}
+		})
 	}
 }
 

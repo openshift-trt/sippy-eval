@@ -2241,6 +2241,12 @@ func (s *Server) Serve() {
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
+	// StrictSlash has no effect on PathPrefix routes in gorilla/mux,
+	// so we need an explicit redirect for the path without a trailing slash.
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+	})
+
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
 	// goes to index.html
 	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2876,8 +2882,7 @@ func (s *Server) Serve() {
 		// Try to open the file from static filesystem (embedded FS keeps directory structure)
 		filePath := "static" + r.URL.Path
 		if _, err := s.static.Open(filePath); err != nil {
-			// File doesn't exist in static, redirect to sippy-ng
-			if r.URL.Path == "/" {
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
 				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
