@@ -57,7 +57,7 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 ### Background processes
 
-`sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
+`sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic). When an existing process is detected, the tool polls the HTTP endpoint to verify the API is actually accepting requests before reporting ready. If the API does not respond within `ready_timeout` seconds (default 120), the tool reports the process as detected but not ready.
 
 ## Cursor skills
 
