@@ -377,6 +377,7 @@ async def sippy_serve(
     enable_write_endpoints: bool = True,
     data_provider: str | None = None,
     restart: bool = False,
+    ready_timeout: int = 120,
 ) -> str:
     """Start the Sippy HTTP server (``go run ./cmd/sippy serve``) in the background.
 
@@ -420,8 +421,15 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_url(host_hint, ready_timeout)
+            if err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not responding "
+                    f"({err}). It may still be compiling. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -470,7 +478,7 @@ async def sippy_serve(
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=host_hint, ready_timeout=ready_timeout,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -499,6 +507,7 @@ async def sippy_ng_start(
     log_file: str = "sippy-dev-logs/sippy_ng_start.log",
     open_browser: bool = False,
     restart: bool = False,
+    ready_timeout: int = 120,
 ) -> str:
     """Start the React dev server (``npm start`` in ``sippy-ng``) in the background.
 
@@ -519,9 +528,17 @@ async def sippy_ng_start(
     if existing:
         if not restart:
             pids = ", ".join(str(p) for p in existing)
+            ready_url = "http://127.0.0.1:3000/sippy-ng"
+            err = await _wait_for_url(ready_url, ready_timeout)
+            if err:
+                return (
+                    f"sippy_ng_start process detected (pid(s) {pids}) but not responding "
+                    f"({err}). It may still be starting. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
-                f"sippy_ng_start already running (pid(s) {pids}). "
-                f"Typical URL: http://127.0.0.1:3000/sippy-ng log: {log_path}. "
+                f"sippy_ng_start already running and ready (pid(s) {pids}). "
+                f"URL: http://127.0.0.1:3000/sippy-ng log: {log_path}. "
                 f"Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -537,6 +554,7 @@ async def sippy_ng_start(
         log_path=log_path,
         env=env,
         ready_url="http://127.0.0.1:3000/sippy-ng",
+        ready_timeout=ready_timeout,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -546,8 +564,21 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+async def _wait_for_url(url: str, timeout: int) -> str | None:
     """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
+async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+    """Poll *url* until it responds, *proc* exits, or *timeout* seconds elapse."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
