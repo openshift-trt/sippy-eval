@@ -7,11 +7,83 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
 	"github.com/openshift/sippy/pkg/db/models"
 )
+
+func TestSippyNGRedirectWithoutTrailingSlash(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("SPA"))
+	})
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedLoc    string
+	}{
+		{
+			name:           "without trailing slash redirects to SPA",
+			path:           "/sippy-ng",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "with trailing slash serves SPA",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "sub-path serves SPA",
+			path:           "/sippy-ng/component_readiness/main",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "root redirects to SPA",
+			path:           "/",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "unknown path returns 404",
+			path:           "/nonexistent",
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tc.expectedStatus {
+				t.Errorf("expected status %d for %s, got %d", tc.expectedStatus, tc.path, w.Code)
+			}
+			if tc.expectedLoc != "" {
+				loc := w.Header().Get("Location")
+				if loc != tc.expectedLoc {
+					t.Errorf("expected Location %q, got %q", tc.expectedLoc, loc)
+				}
+			}
+		})
+	}
+}
 
 func TestValidateProwJobRun(t *testing.T) {
 

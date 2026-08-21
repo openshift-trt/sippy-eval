@@ -2876,8 +2876,10 @@ func (s *Server) Serve() {
 		// Try to open the file from static filesystem (embedded FS keeps directory structure)
 		filePath := "static" + r.URL.Path
 		if _, err := s.static.Open(filePath); err != nil {
-			// File doesn't exist in static, redirect to sippy-ng
-			if r.URL.Path == "/" {
+			// Redirect root and /sippy-ng (without trailing slash) to the SPA.
+			// The PathPrefix("/sippy-ng/") route requires the trailing slash, and
+			// StrictSlash has no effect on PathPrefix routes in gorilla/mux.
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
 				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
