@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_url,
 )
 
 
@@ -297,3 +299,39 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForUrl:
+    def test_returns_none_on_immediate_success(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _wait_for_url("http://127.0.0.1:8080", timeout=5)
+            )
+            assert result is None
+
+    def test_returns_error_on_timeout(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _wait_for_url("http://127.0.0.1:8080", timeout=2)
+            )
+            assert result is not None
+            assert "not ready after 2s" in result
+            assert "http://127.0.0.1:8080" in result
+
+    def test_succeeds_after_retries(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionRefusedError("refused")
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _wait_for_url("http://127.0.0.1:8080", timeout=30)
+            )
+            assert result is None
+            assert call_count == 3
