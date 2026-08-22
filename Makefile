@@ -33,7 +33,16 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+mcp-venv: mcp/.venv/.make-installed
+
+mcp/.venv/.make-installed: mcp/requirements.txt
+	test -x mcp/.venv/bin/python || python3 -m venv mcp/.venv
+	mcp/.venv/bin/python -m ensurepip --upgrade -q 2>/dev/null || true
+	mcp/.venv/bin/python -m pip install --upgrade pip -q
+	mcp/.venv/bin/python -m pip install -r mcp/requirements.txt -q
+	@touch $@
+
+test: builddir npm mcp-venv
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -42,6 +51,7 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	cd mcp; .venv/bin/pytest test_server.py -v $(if $(ARTIFACT_DIR),--junitxml=$(ARTIFACT_DIR)/junit-mcp.xml,--junitxml=../junit-mcp.xml)
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
