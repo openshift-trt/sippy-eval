@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +109,97 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("spa"))
+	})
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	tests := []struct {
+		name             string
+		path             string
+		expectedStatus   int
+		expectedLocation string
+	}{
+		{
+			name:             "root redirects to /sippy-ng/",
+			path:             "/",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:             "/sippy-ng without trailing slash redirects",
+			path:             "/sippy-ng",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/",
+		},
+		{
+			name:             "/sippy-ng with query params preserves them",
+			path:             "/sippy-ng?release=4.16&tab=tests",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedLocation: "/sippy-ng/?release=4.16&tab=tests",
+		},
+		{
+			name:           "/sippy-ng/ serves the SPA",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "/sippy-ng/component_readiness/main serves the SPA",
+			path:           "/sippy-ng/component_readiness/main",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "unknown path returns 404",
+			path:           "/unknown",
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, resp.StatusCode)
+			}
+
+			if tc.expectedLocation != "" {
+				loc := resp.Header.Get("Location")
+				if loc != tc.expectedLocation {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLocation, loc)
+				}
+			}
+		})
 	}
 }
 
