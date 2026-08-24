@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +19,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
 )
 
 
@@ -297,3 +301,52 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForReady:
+    def _start_http_server(self):
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        return srv, port
+
+    def test_ready_url_responds(self):
+        srv, port = self._start_http_server()
+        try:
+            result = asyncio.run(
+                _wait_for_ready(f"http://127.0.0.1:{port}", timeout=5)
+            )
+            assert result is None
+        finally:
+            srv.server_close()
+
+    def test_ready_url_not_responding(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=2)
+        )
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_proc_exit_detected(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=5, proc=proc)
+        )
+        assert result is not None
+        assert "process exited" in result
+
+    def test_proc_none_skips_poll(self):
+        result = asyncio.run(
+            _wait_for_ready("http://127.0.0.1:19999", timeout=2, proc=None)
+        )
+        assert "not ready after 2s" in result
