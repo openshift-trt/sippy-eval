@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +14,8 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +302,67 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+    def test_pid_one_is_alive(self):
+        assert _pid_alive(1) is True
+
+
+class TestPollUrl:
+    @pytest.fixture()
+    def _http_server(self):
+        handler = http.server.BaseHTTPRequestHandler
+        original_do_GET = getattr(handler, "do_GET", None)
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        handler.do_GET = do_GET
+        handler.log_message = lambda *_args: None
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        yield port
+        srv.shutdown()
+        if original_do_GET:
+            handler.do_GET = original_do_GET
+        else:
+            delattr(handler, "do_GET")
+
+    def test_returns_none_when_url_responds(self, _http_server):
+        port = _http_server
+        result = asyncio.run(
+            _poll_url(f"http://127.0.0.1:{port}", timeout=5)
+        )
+        assert result is None
+
+    def test_returns_error_when_url_unreachable(self):
+        result = asyncio.run(
+            _poll_url("http://127.0.0.1:19999", timeout=2)
+        )
+        assert result is not None
+        assert "not ready after" in result
+
+    def test_returns_error_when_pids_exit(self):
+        result = asyncio.run(
+            _poll_url("http://127.0.0.1:19999", timeout=10, pids=[2**22 - 1])
+        )
+        assert result is not None
+        assert "exited" in result
+
+    def test_with_live_pid_and_responding_url(self, _http_server):
+        port = _http_server
+        result = asyncio.run(
+            _poll_url(f"http://127.0.0.1:{port}", timeout=5, pids=[os.getpid()])
+        )
+        assert result is None
