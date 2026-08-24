@@ -62,27 +62,10 @@ export default function TestRegressionsTable({
     return filterModel.items.filter((f) => f.columnField === 'variants')
   }, [filterModel])
 
-  const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
-
-    if (variantFilters.length === 0) return filtered
-
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
-  }, [regressions, variantFilters])
+  const filteredRegressions = useMemo(
+    () => filterRegressions(regressions, variantFilters),
+    [regressions, variantFilters]
+  )
 
   if (!isLoaded) {
     return <p>Loading...</p>
@@ -159,4 +142,22 @@ TestRegressionsTable.propTypes = {
   release: PropTypes.string.isRequired,
   testName: PropTypes.string.isRequired,
   filterModel: PropTypes.object,
+}
+
+export function filterRegressions(regressions, variantFilters) {
+  let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
+
+  if (variantFilters.length === 0) return filtered
+
+  return filtered.filter((regression) => {
+    const variants = (regression.variants || []).map((v) => v.toLowerCase())
+
+    return variantFilters.every((filter) => {
+      const hasMatch = variants.some((v) => v === filter.value.toLowerCase())
+      if (filter.not) {
+        return !hasMatch
+      }
+      return hasMatch
+    })
+  })
 }
