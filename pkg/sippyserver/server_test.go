@@ -7,11 +7,64 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
 	"github.com/openshift/sippy/pkg/db/models"
 )
+
+func TestSippyNgRedirectWithoutTrailingSlash(t *testing.T) {
+	router := mux.NewRouter()
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+	})
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name             string
+		path             string
+		expectedStatus   int
+		expectedRedirect string
+	}{
+		{
+			name:             "bare path redirects to trailing slash",
+			path:             "/sippy-ng",
+			expectedStatus:   http.StatusMovedPermanently,
+			expectedRedirect: "/sippy-ng/",
+		},
+		{
+			name:           "trailing slash serves directly",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "sub-path serves directly",
+			path:           "/sippy-ng/component_readiness/main",
+			expectedStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, rec.Code)
+			}
+			if tc.expectedRedirect != "" {
+				loc := rec.Header().Get("Location")
+				if loc != tc.expectedRedirect {
+					t.Fatalf("expected redirect to %q, got %q", tc.expectedRedirect, loc)
+				}
+			}
+		})
+	}
+}
 
 func TestValidateProwJobRun(t *testing.T) {
 
