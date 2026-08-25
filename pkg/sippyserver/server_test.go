@@ -7,11 +7,30 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
 	"github.com/openshift/sippy/pkg/db/models"
 )
+
+func TestSippyNgRedirectWithoutTrailingSlash(t *testing.T) {
+	router := mux.NewRouter()
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+	})
+
+	req := httptest.NewRequest("GET", "/sippy-ng", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected status %d, got %d", http.StatusMovedPermanently, w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/sippy-ng/" {
+		t.Fatalf("expected redirect to /sippy-ng/, got %s", loc)
+	}
+}
 
 func TestValidateProwJobRun(t *testing.T) {
 
