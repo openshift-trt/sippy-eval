@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,11 +14,13 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_is_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_http,
 )
 
 
@@ -297,3 +302,41 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidIsAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_is_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_is_alive(2**22 - 1) is False
+
+
+class TestWaitForHttp:
+    def test_returns_none_when_url_responds(self):
+        handler = http.server.SimpleHTTPRequestHandler
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        try:
+            result = asyncio.run(
+                _wait_for_http(f"http://127.0.0.1:{port}", 5, [os.getpid()])
+            )
+            assert result is None
+        finally:
+            srv.server_close()
+
+    def test_returns_error_when_timeout(self):
+        result = asyncio.run(
+            _wait_for_http("http://127.0.0.1:19999", 2, [os.getpid()])
+        )
+        assert result is not None
+        assert "not ready after 2s" in result
+
+    def test_returns_error_when_process_exits(self):
+        result = asyncio.run(
+            _wait_for_http("http://127.0.0.1:19999", 30, [2**22 - 1])
+        )
+        assert result is not None
+        assert "exited" in result
