@@ -59,6 +59,19 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 `sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
 
+## Testing
+
+Unit tests for the MCP server helpers live in **`test_server.py`** and are run by **`make test`** alongside the Go and React test suites. The Makefile automatically creates the virtualenv and installs dev dependencies (`requirements-dev.txt`) on first run.
+
+To run MCP tests independently:
+
+```bash
+cd mcp
+test -d .venv || python3 -m venv .venv
+.venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt
+.venv/bin/python -m pytest test_server.py
+```
+
 ## Cursor skills
 
 Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
