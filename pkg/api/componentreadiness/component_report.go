@@ -585,6 +585,7 @@ func initTestAnalysisStruct(
 
 	// Default to required confidence from request, middleware may adjust later.
 	testStats.RequiredConfidence = reqOptions.AdvancedOption.Confidence
+	testStats.Explanations = []string{}
 
 	testStats.SampleStats = testdetails.ReleaseStats{
 		Release: reqOptions.SampleRelease.Name,
