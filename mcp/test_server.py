@@ -1,5 +1,8 @@
+import asyncio
 import os
 import tempfile
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +14,8 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +302,49 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(2**22 - 1) is False
+
+
+class _OKHandler(BaseHTTPRequestHandler):
+    def do_GET(self, *_a):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *_a):
+        pass
+
+
+class TestPollUrl:
+    def test_returns_none_when_url_responds(self):
+        srv = HTTPServer(("127.0.0.1", 0), _OKHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.handle_request, daemon=True)
+        t.start()
+        try:
+            result = asyncio.run(
+                _poll_url(f"http://127.0.0.1:{port}", timeout=5, pids=[os.getpid()])
+            )
+            assert result is None
+        finally:
+            srv.server_close()
+
+    def test_returns_error_on_timeout(self):
+        result = asyncio.run(
+            _poll_url("http://127.0.0.1:1", timeout=2, pids=[os.getpid()])
+        )
+        assert result is not None
+        assert "not responding" in result
+
+    def test_returns_error_when_pids_exit(self):
+        result = asyncio.run(
+            _poll_url("http://127.0.0.1:1", timeout=10, pids=[2**22 - 1])
+        )
+        assert result is not None
+        assert "exited" in result

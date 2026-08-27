@@ -420,8 +420,14 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _poll_url(host_hint, 120, existing)
+            if err:
+                return (
+                    f"sippy_serve running (pid(s) {pids}) but not ready: {err}. "
+                    f"log: {log_path}. Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
+                f"sippy_serve already running and ready (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
@@ -544,6 +550,33 @@ async def sippy_ng_start(
         f"sippy_ng_start started and ready (pid {pid_or_err}). URL: http://127.0.0.1:3000/sippy-ng "
         f"log: {log_path}"
     )
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if *pid* is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+async def _poll_url(url: str, timeout: int, pids: list[int]) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    Returns early if all *pids* exit.  Returns an error string or ``None`` on success.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if not any(_pid_alive(p) for p in pids):
+            return "backend process(es) exited while waiting for API readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"backend process started but API not responding after {timeout}s (checked {url})"
 
 
 async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
