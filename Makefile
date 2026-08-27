@@ -1,7 +1,7 @@
 export PATH := ${HOME}/go/bin:/go/bin:${PATH}
 
 DOCKER := $(or $(DOCKER),podman)
-NO_DEP_CHECK_TARGETS := devcontainer-up devcontainer-claude
+NO_DEP_CHECK_TARGETS := devcontainer-up devcontainer-claude mcp-test
 ifeq ($(filter $(NO_DEP_CHECK_TARGETS),$(MAKECMDGOALS)),)
 DEPS = npm go
 CHECK := $(foreach dep,$(DEPS),\
@@ -42,6 +42,21 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	$(MAKE) mcp-test
+
+mcp-test:
+	@if [ ! -x mcp/.venv/bin/python ]; then \
+		python3 -m venv mcp/.venv; \
+	fi
+	@if ! mcp/.venv/bin/python -m pip --version >/dev/null 2>&1; then \
+		mcp/.venv/bin/python -m ensurepip --upgrade; \
+	fi
+	mcp/.venv/bin/python -m pip install -r mcp/requirements.txt -r mcp/requirements-dev.txt -q
+ifeq ($(ARTIFACT_DIR),)
+	cd mcp; .venv/bin/python -m pytest test_server.py -v
+else
+	cd mcp; .venv/bin/python -m pytest test_server.py -v --junitxml=$(ARTIFACT_DIR)/junit_mcp.xml
+endif
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
