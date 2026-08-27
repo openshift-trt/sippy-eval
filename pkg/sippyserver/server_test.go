@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +146,69 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+func TestSippyNgTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		target := "/sippy-ng/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	tests := []struct {
+		name         string
+		path         string
+		wantCode     int
+		wantLocation string
+	}{
+		{
+			name:         "redirects /sippy-ng to /sippy-ng/",
+			path:         "/sippy-ng",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:         "preserves query string on redirect",
+			path:         "/sippy-ng?release=4.18",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/?release=4.18",
+		},
+		{
+			name:     "/sippy-ng/ serves directly",
+			path:     "/sippy-ng/",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "/sippy-ng/some/path serves directly",
+			path:     "/sippy-ng/some/path",
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tc.path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("got status %d, want %d", rec.Code, tc.wantCode)
+			}
+			if tc.wantLocation != "" {
+				if loc := rec.Header().Get("Location"); loc != tc.wantLocation {
+					t.Errorf("got Location %q, want %q", loc, tc.wantLocation)
+				}
+			}
+		})
 	}
 }
