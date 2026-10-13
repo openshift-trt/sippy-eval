@@ -2,11 +2,17 @@ package sippyserver
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -145,5 +151,132 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
+	}
+}
+
+// buildTestRouter replicates the sippy-ng and catch-all routing from Serve()
+// using in-memory filesystems, so we can test path handling in isolation.
+func buildTestRouter(sippyNG, static fs.FS) http.Handler {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fsys := sippyNG
+		if r.URL.Path != "/sippy-ng/" {
+			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
+			if _, err := fsys.Open(fullPath); err != nil {
+				if !os.IsNotExist(err) {
+					w.WriteHeader(http.StatusNotFound)
+					w.Header().Set("Content-Type", "text/plain")
+					fmt.Fprintf(w, "404 Not Found: %s", fullPath)
+					return
+				}
+				r.URL.Path = "/sippy-ng/"
+			}
+		}
+		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fsys))).ServeHTTP(w, r)
+	})
+
+	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(static)))
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		filePath := "static" + r.URL.Path
+		if _, err := static.Open(filePath); err != nil {
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
+		r.URL.Path = "/static" + r.URL.Path
+		http.FileServer(http.FS(static)).ServeHTTP(w, r)
+	})
+
+	return router
+}
+
+func TestSippyNGRouting(t *testing.T) {
+	sippyNG := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html>sippy</html>")},
+	}
+	static := fstest.MapFS{
+		"static/favicon.ico": &fstest.MapFile{Data: []byte("icon")},
+	}
+
+	handler := buildTestRouter(sippyNG, static)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	tests := []struct {
+		name           string
+		path           string
+		wantCode       int
+		wantLocation   string
+		wantBodySubstr string
+	}{
+		{
+			name:         "root redirects to /sippy-ng/",
+			path:         "/",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:         "/sippy-ng without trailing slash redirects",
+			path:         "/sippy-ng",
+			wantCode:     http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:           "/sippy-ng/ serves the SPA",
+			path:           "/sippy-ng/",
+			wantCode:       http.StatusOK,
+			wantBodySubstr: "sippy",
+		},
+		{
+			name:           "/sippy-ng/unknown-route falls back to SPA index",
+			path:           "/sippy-ng/component_readiness/main",
+			wantCode:       http.StatusOK,
+			wantBodySubstr: "sippy",
+		},
+		{
+			name:     "/unknown returns 404",
+			path:     "/unknown",
+			wantCode: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("request to %s failed: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.wantCode {
+				t.Errorf("GET %s: got status %d, want %d", tc.path, resp.StatusCode, tc.wantCode)
+			}
+
+			if tc.wantLocation != "" {
+				got := resp.Header.Get("Location")
+				if got != tc.wantLocation {
+					t.Errorf("GET %s: got Location %q, want %q", tc.path, got, tc.wantLocation)
+				}
+			}
+
+			if tc.wantBodySubstr != "" {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), tc.wantBodySubstr) {
+					t.Errorf("GET %s: body %q does not contain %q", tc.path, string(body), tc.wantBodySubstr)
+				}
+			}
+		})
 	}
 }
