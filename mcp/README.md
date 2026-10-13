@@ -17,6 +17,21 @@ Simple commands (migrate, lint, test) are documented in project instructions via
   mcp/.venv/bin/pip install -r mcp/requirements.txt
   ```
 
+## Testing
+
+MCP server unit tests live in `test_server.py` and are run as part of `make test`:
+
+```bash
+make test          # runs Go, React, and MCP tests
+make mcp-deps      # install MCP venv only (prerequisite of make test)
+```
+
+To run them standalone:
+
+```bash
+cd mcp && .venv/bin/pytest test_server.py -v
+```
+
 ## Editor configuration
 
 | Client      | Config file             |
