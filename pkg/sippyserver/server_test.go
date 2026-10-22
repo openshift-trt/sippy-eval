@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -146,4 +147,104 @@ func TestEncodeDefaultHighRisk(t *testing.T) {
 	if analysis.OverallRisk.Level.Level != apitype.FailureRiskLevelHigh.Level {
 		t.Fatal("Invalid overall risk analysis after decoding")
 	}
+}
+
+func TestSippyNGTrailingSlashRedirect(t *testing.T) {
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+			target := "/sippy-ng/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	tests := []struct {
+		name           string
+		path           string
+		expectedStatus int
+		expectedLoc    string
+	}{
+		{
+			name:           "no trailing slash redirects",
+			path:           "/sippy-ng",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "no trailing slash preserves query string",
+			path:           "/sippy-ng?view=4.19",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/?view=4.19",
+		},
+		{
+			name:           "root redirects to sippy-ng",
+			path:           "/",
+			expectedStatus: http.StatusMovedPermanently,
+			expectedLoc:    "/sippy-ng/",
+		},
+		{
+			name:           "trailing slash serves directly",
+			path:           "/sippy-ng/",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "subpath serves directly",
+			path:           "/sippy-ng/component_readiness/main",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "unknown path returns 404",
+			path:           "/unknown",
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rr := httptest.NewRecorder()
+			router.ServeHTTP(rr, req)
+
+			if rr.Code != tc.expectedStatus {
+				t.Fatalf("expected status %d, got %d", tc.expectedStatus, rr.Code)
+			}
+			if tc.expectedLoc != "" {
+				loc := rr.Header().Get("Location")
+				if loc != tc.expectedLoc {
+					t.Fatalf("expected Location %q, got %q", tc.expectedLoc, loc)
+				}
+			}
+		})
+	}
+
+	// Verify a real HTTP client follows the redirect from /sippy-ng to /sippy-ng/
+	t.Run("end-to-end redirect with real HTTP client", func(t *testing.T) {
+		srv := httptest.NewServer(router)
+		defer srv.Close()
+
+		resp, err := http.Get(srv.URL + "/sippy-ng")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected final status 200 after redirect, got %d", resp.StatusCode)
+		}
+		if !strings.HasSuffix(resp.Request.URL.Path, "/sippy-ng/") {
+			t.Fatalf("expected final URL to end with /sippy-ng/, got %s", resp.Request.URL.Path)
+		}
+	})
 }

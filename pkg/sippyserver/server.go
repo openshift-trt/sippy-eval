@@ -2877,8 +2877,12 @@ func (s *Server) Serve() {
 		filePath := "static" + r.URL.Path
 		if _, err := s.static.Open(filePath); err != nil {
 			// File doesn't exist in static, redirect to sippy-ng
-			if r.URL.Path == "/" {
-				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+			if r.URL.Path == "/" || r.URL.Path == "/sippy-ng" {
+				target := "/sippy-ng/"
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
 			}
