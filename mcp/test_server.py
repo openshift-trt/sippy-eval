@@ -11,6 +11,7 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_alive,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +298,17 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidAlive:
+    def test_current_process_is_alive(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_alive(4_000_000) is False
+
+    def test_overflow_pid(self):
+        assert _pid_alive(4_000_000_000) is False
+
+    def test_parent_process_is_alive(self):
+        assert _pid_alive(os.getppid()) is True

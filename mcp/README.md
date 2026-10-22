@@ -59,6 +59,8 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 `sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
 
+Both tools verify HTTP readiness (polling the listen URL) before reporting the server as ready. For `sippy_serve`, this applies whether the process was just spawned or was already running — the tool will poll the HTTP endpoint for up to 120 seconds before reporting ready, avoiding false positives during `go run` compilation.
+
 ## Cursor skills
 
 Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
