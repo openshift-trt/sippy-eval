@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,8 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _pid_exists,
+    _poll_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
@@ -297,3 +300,58 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestPidExists:
+    def test_current_process(self):
+        assert _pid_exists(os.getpid()) is True
+
+    def test_nonexistent_pid(self):
+        assert _pid_exists(2**22 - 1) is False
+
+
+class TestPollUrl:
+    def test_success_on_first_try(self):
+        with mock.patch("server.urllib.request.urlopen"):
+            result = asyncio.run(
+                _poll_url("http://localhost:8080", timeout=5)
+            )
+            assert result is None
+
+    def test_timeout_when_url_never_responds(self):
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _poll_url("http://localhost:9999", timeout=2)
+            )
+            assert result is not None
+            assert "not ready after 2s" in result
+
+    def test_returns_early_when_pids_exit(self):
+        fake_pid = 2**22 - 1
+        with mock.patch(
+            "server.urllib.request.urlopen", side_effect=ConnectionRefusedError
+        ):
+            result = asyncio.run(
+                _poll_url("http://localhost:9999", timeout=30, pids=[fake_pid])
+            )
+            assert result is not None
+            assert "process exited" in result
+
+    def test_success_after_initial_failures(self):
+        call_count = 0
+
+        def _urlopen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionRefusedError
+            return mock.MagicMock()
+
+        with mock.patch("server.urllib.request.urlopen", side_effect=_urlopen):
+            result = asyncio.run(
+                _poll_url("http://localhost:8080", timeout=30)
+            )
+            assert result is None
+            assert call_count >= 3
