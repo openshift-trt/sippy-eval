@@ -175,6 +175,12 @@ class TestResolveBigqueryCreds:
 
 
 class TestDataMode:
+    @pytest.fixture(autouse=True)
+    def env_file_exists(self):
+        with mock.patch("server._DEVCONTAINER_ENV") as env_file:
+            env_file.is_file.return_value = True
+            yield
+
     def _patch_dotenv(self, vals):
         return mock.patch("server.dotenv_values", return_value=vals)
 

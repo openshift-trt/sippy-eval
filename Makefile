@@ -1,6 +1,7 @@
 export PATH := ${HOME}/go/bin:/go/bin:${PATH}
 
 DOCKER := $(or $(DOCKER),podman)
+PYTHON ?= python3
 NO_DEP_CHECK_TARGETS := devcontainer-up devcontainer-claude
 ifeq ($(filter $(NO_DEP_CHECK_TARGETS),$(MAKECMDGOALS)),)
 DEPS = npm go
@@ -33,7 +34,7 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+test: builddir npm test-mcp
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -42,6 +43,15 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+
+.PHONY: test-mcp
+test-mcp: mcp/.venv/bin/pytest
+	mcp/.venv/bin/python -m pytest mcp --junitxml=$(if $(ARTIFACT_DIR),$(ARTIFACT_DIR)/junit-mcp.xml,mcp/junit.xml)
+
+mcp/.venv/bin/pytest: mcp/requirements.txt mcp/requirements-test.txt
+	$(PYTHON) -m venv mcp/.venv
+	mcp/.venv/bin/python -m pip install -r mcp/requirements-test.txt
+	touch $@
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...

@@ -17,6 +17,25 @@ Simple commands (migrate, lint, test) are documented in project instructions via
   mcp/.venv/bin/pip install -r mcp/requirements.txt
   ```
 
+## Tests
+
+`make test` runs the Go, frontend, and MCP server unit tests. To run only the MCP
+tests from the repo root:
+
+```bash
+make test-mcp
+```
+
+The target creates or updates `mcp/.venv` and installs the server and test
+dependencies from `mcp/requirements-test.txt`. It requires Python with `venv` and
+`pip` support; use `make test-mcp PYTHON=python3.12` if the default `python3` is not
+the Python version described in Setup. Subsequent runs reuse the environment
+unless the requirements change. Tests do not require running Sippy or databases.
+
+MCP JUnit results are written to `mcp/junit.xml`, or to
+`$(ARTIFACT_DIR)/junit-mcp.xml` when `ARTIFACT_DIR` is set, separately from Go
+results. Any MCP test failure causes the Make target to fail.
+
 ## Editor configuration
 
 | Client      | Config file             |
