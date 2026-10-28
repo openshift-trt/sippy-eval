@@ -15,9 +15,70 @@ import {
   relativeTime,
   safeEncodeURIComponent,
 } from '../helpers'
+import { shouldKeepFilterItem } from '../datagrid/filterUtils'
 import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
+
+// Operators the variants column offers; anything else can't be evaluated against an
+// array of variants, so we ignore it rather than hiding every regression.
+const VARIANT_OPERATORS = [
+  'has entry',
+  'has entry containing',
+  'is empty',
+  'isEmpty',
+  'is not empty',
+  'isNotEmpty',
+]
+
+// variantFilterItems returns the variant filters from a filter model that can be
+// evaluated against a regression.
+export function variantFilterItems(filterModel) {
+  if (!filterModel || !filterModel.items) return []
+  return filterModel.items.filter(
+    (f) =>
+      f.columnField === 'variants' &&
+      VARIANT_OPERATORS.includes(f.operatorValue) &&
+      shouldKeepFilterItem({ ...f, value: f.value ?? '' })
+  )
+}
+
+// regressionMatchesVariantFilters reports whether a regression satisfies the given
+// variant filters. Regression variants are stored fully qualified as "Group:value",
+// the same form the API matches filter values against for the tests table.
+export function regressionMatchesVariantFilters(
+  regression,
+  variantFilters,
+  linkOperator = 'and'
+) {
+  const variants = regression.variants || []
+
+  const results = variantFilters.map((filter) => {
+    const value = String(filter.value ?? '').toLowerCase()
+
+    let matches
+    switch (filter.operatorValue) {
+      case 'has entry containing':
+        matches = variants.some((v) => v.toLowerCase().includes(value))
+        break
+      case 'is empty':
+      case 'isEmpty':
+        matches = variants.length === 0
+        break
+      case 'is not empty':
+      case 'isNotEmpty':
+        matches = variants.length > 0
+        break
+      case 'has entry':
+      default:
+        matches = variants.some((v) => v.toLowerCase() === value)
+    }
+
+    return filter.not ? !matches : matches
+  })
+
+  return linkOperator === 'or' ? results.some(Boolean) : results.every(Boolean)
+}
 
 export default function TestRegressionsTable({
   release,
@@ -57,32 +118,24 @@ export default function TestRegressionsTable({
       })
   }, [release, testName])
 
-  const variantFilters = useMemo(() => {
-    if (!filterModel || !filterModel.items) return []
-    return filterModel.items.filter((f) => f.columnField === 'variants')
-  }, [filterModel])
+  const variantFilters = useMemo(
+    () => variantFilterItems(filterModel),
+    [filterModel]
+  )
 
   const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
+    const open = regressions.filter((r) => !r.closed || !r.closed.Valid)
 
-    if (variantFilters.length === 0) return filtered
+    if (variantFilters.length === 0) return open
 
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
+    return open.filter((regression) =>
+      regressionMatchesVariantFilters(
+        regression,
+        variantFilters,
+        filterModel?.linkOperator
       )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
-  }, [regressions, variantFilters])
+    )
+  }, [regressions, variantFilters, filterModel])
 
   if (!isLoaded) {
     return <p>Loading...</p>
