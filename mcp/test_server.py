@@ -175,6 +175,12 @@ class TestResolveBigqueryCreds:
 
 
 class TestDataMode:
+    @pytest.fixture(autouse=True)
+    def env_file(self):
+        with mock.patch("server._DEVCONTAINER_ENV") as env_file:
+            env_file.is_file.return_value = True
+            yield env_file
+
     def _patch_dotenv(self, vals):
         return mock.patch("server.dotenv_values", return_value=vals)
 
@@ -198,10 +204,9 @@ class TestDataMode:
         with self._patch_dotenv({"SIPPY_DATA_MODE": "PROD-LIKE"}):
             assert _data_mode() == "prod-like"
 
-    def test_no_env_file(self):
-        with mock.patch("server._DEVCONTAINER_ENV") as mock_path:
-            mock_path.is_file.return_value = False
-            assert _data_mode() == "seed"
+    def test_no_env_file(self, env_file):
+        env_file.is_file.return_value = False
+        assert _data_mode() == "seed"
 
 
 class TestDsnForMode:

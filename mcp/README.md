@@ -17,6 +17,22 @@ Simple commands (migrate, lint, test) are documented in project instructions via
   mcp/.venv/bin/pip install -r mcp/requirements.txt
   ```
 
+## Tests
+
+Run `make test` from the repo root to run the Go, frontend, and MCP server tests.
+To run only the MCP server tests:
+
+```bash
+make test-mcp
+```
+
+The MCP test target uses [uv](https://docs.astral.sh/uv/) to provide Python 3.12
+and an isolated environment containing `mcp/requirements.txt` and `pytest`.
+If uv is missing, the target downloads it into a temporary directory using `curl`
+and removes it afterward. A first run requires network access to download tooling
+and dependencies; no manual virtualenv setup is needed. Test failures fail the
+Make target.
+
 ## Editor configuration
 
 | Client      | Config file             |

@@ -33,7 +33,8 @@ sippy: builddir
 sippy-daemon: builddir
 	go build $(LDFLAGS) -mod=vendor ./cmd/sippy-daemon/...
 
-test: builddir npm
+.PHONY: test test-mcp
+test: builddir npm test-mcp
 ifeq ($(ARTIFACT_DIR),)
 	@echo "ARTIFACT_DIR is not defined. Using default JUnit file location."
 	gotestsum --junitfile ./junit.xml ./pkg/...
@@ -42,6 +43,19 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+
+test-mcp:
+	@set -eu; \
+	uv_bin=$$(command -v uv || true); \
+	if [ -z "$$uv_bin" ]; then \
+		uv_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$uv_dir"' EXIT; \
+		curl -LsSf https://astral.sh/uv/install.sh -o "$$uv_dir/install.sh"; \
+		UV_INSTALL_DIR="$$uv_dir" INSTALLER_NO_MODIFY_PATH=1 sh "$$uv_dir/install.sh"; \
+		uv_bin="$$uv_dir/uv"; \
+	fi; \
+	"$$uv_bin" run --isolated --no-project --python 3.12 \
+		--with-requirements mcp/requirements.txt --with pytest pytest mcp/
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
