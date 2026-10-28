@@ -26,4 +26,7 @@ Run lint: `make lint`
 
 Run unit tests: `make test`
 
-This runs Go tests via gotestsum and sippy-ng Jest tests.
+This runs the MCP server pytest suite, Go tests via gotestsum, and sippy-ng Jest tests.
+
+Run just the MCP server tests: `make test-mcp` (bootstraps `mcp/.venv` from
+`mcp/requirements-dev.txt` as needed).

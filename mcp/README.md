@@ -6,16 +6,16 @@ Simple commands (migrate, lint, test) are documented in project instructions via
 
 ## Setup
 
-**`mcp/run.sh`** is the entry point. It auto-creates the virtualenv (`mcp/.venv`) and installs dependencies on first run — no manual setup required. The devcontainer's `post-create.sh` pre-warms the venv during build.
+**`mcp/run.sh`** is the entry point. It delegates to **`mcp/setup-venv.sh`**, which creates the virtualenv (`mcp/.venv`) and installs dependencies on first run — no manual setup required. The devcontainer's `post-create.sh` pre-warms the venv during build.
 
-- **Python 3.12** required. The devcontainer image installs it; on macOS use `brew install python@3.12`.
+- **Python 3.12** or newer required. The devcontainer image installs it; on macOS use `brew install python@3.12`.
 - **Manual venv setup** (if you prefer not to use `run.sh`):
 
   ```bash
-  python3.12 -m venv mcp/.venv
-  mcp/.venv/bin/pip install --upgrade pip
-  mcp/.venv/bin/pip install -r mcp/requirements.txt
+  ./mcp/setup-venv.sh
   ```
+
+  `setup-venv.sh` uses `uv` when it is on `PATH` and falls back to `python -m venv` plus `pip`. It installs **`requirements-dev.txt`** (the runtime deps plus `pytest`) and is a no-op until those requirement files change, so it is safe — and cheap — to call on every run. Override the base interpreter with `PYTHON=python3.13 ./mcp/setup-venv.sh`.
 
 ## Editor configuration
 
@@ -67,10 +67,27 @@ Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
 - `sippy-dev-app` (backend + frontend)
 - `sippy-dev-tests` (order: `CI=true make lint` → `make test` → `make e2e`)
 
+## Tests
+
+`mcp/test_server.py` covers the helper functions in `server.py` (path validation, DSN and
+credential resolution, process checks). Run them with:
+
+```bash
+make test-mcp
+```
+
+`make test` runs this suite along with the Go and sippy-ng tests, so CI covers it too. The
+target bootstraps `mcp/.venv` from **`requirements-dev.txt`** (runtime deps plus `pytest`)
+and writes JUnit output to `junit-mcp.xml`, or `$ARTIFACT_DIR/junit-mcp.xml` when
+`ARTIFACT_DIR` is set.
+
+Tests must not depend on devcontainer state — `.devcontainer/.env` is gitignored and absent
+in CI, so mock `server._DEVCONTAINER_ENV` rather than assuming the file exists.
+
 ## Changing the server
 
 After editing **`server.py`**, restart the **sippy-dev** MCP server (or reload the editor) so tool lists stay in sync.
 
 ## Adding tools
 
-Add `@mcp.tool()` handlers in `server.py`, mirror existing patterns (`subprocess`, `_repo_path`, `_ensure_dev_log_dir`, credentials helpers), then restart MCP.
+Add `@mcp.tool()` handlers in `server.py`, mirror existing patterns (`subprocess`, `_repo_path`, `_ensure_dev_log_dir`, credentials helpers), cover new helpers in `test_server.py`, then restart MCP.
