@@ -7,6 +7,13 @@ break backwards compatability where possible.
 For exact API usage, you can use your browser's web developer tools to
 examine the requests we make.
 
+## Component Readiness
+
+Endpoints: `/api/component_readiness`, `/api/component_readiness/test_details`
+
+Test comparisons include an `explanations` array of strings describing the
+assessment. Comparisons without explanations return an empty array (`[]`).
+
 ## Filtering and sorting
 
 ### Filtering
