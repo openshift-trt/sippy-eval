@@ -59,6 +59,15 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 `sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
 
+Both tools report **ready** only after the HTTP endpoint answers, not merely because a process exists — a cold `go run ./cmd/sippy serve` can spend a minute compiling before it binds a port, and starting the frontend against a backend in that state leaves the app in a degraded state.
+
+| Tool             | Readiness probe                       | Default wait |
+| ---------------- | ------------------------------------- | ------------ |
+| `sippy_serve`    | `GET <listen>/api/releases`           | 300s         |
+| `sippy_ng_start` | `GET http://127.0.0.1:3000/sippy-ng`  | 180s         |
+
+The probe also runs on the "already running" path, so a detected-but-not-yet-serving process is reported as such instead of being advertised as ready. If the endpoint stays silent, the tool returns an error with the probed URL and a log tail rather than a listen address; adjust with `ready_timeout_seconds` (`0` skips the wait).
+
 ## Cursor skills
 
 Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:

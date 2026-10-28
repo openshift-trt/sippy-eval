@@ -4,6 +4,7 @@ import re
 import signal
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -377,11 +378,16 @@ async def sippy_serve(
     enable_write_endpoints: bool = True,
     data_provider: str | None = None,
     restart: bool = False,
+    ready_timeout_seconds: int = 300,
 ) -> str:
     """Start the Sippy HTTP server (``go run ./cmd/sippy serve``) in the background.
 
-    Long-running: returns after spawn with PID, log path, and listen address. Skips starting
-    if a matching ``sippy serve`` process is already running, unless ``restart`` is True.
+    Long-running: returns once ``GET /api/releases`` answers, with PID, log path, and listen
+    address. Skips starting if a matching ``sippy serve`` process is already running, unless
+    ``restart`` is True — but still waits for the API, because ``go run`` can spend minutes
+    compiling before the HTTP listener binds. Reports an error instead of a listen address if
+    the API stays silent for ``ready_timeout_seconds`` (0 disables the wait). Do not start the
+    frontend until this tool reports the backend ready.
 
     Defaults are derived from ``SIPPY_DATA_MODE`` (``seed`` or ``prod-like``):
 
@@ -415,14 +421,27 @@ async def sippy_serve(
     if not views.is_file():
         return f"views file not found: {views}"
 
+    base_url = _listen_base_url(listen)
+    ready_url = f"{base_url}/api/releases"
+    ready_state = "ready" if ready_timeout_seconds > 0 else "readiness not checked"
+
     existing = _pids_sippy_serve()
     if existing:
         if not restart:
-            host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            if ready_timeout_seconds > 0:
+                err = await _wait_for_ready(ready_url, ready_timeout_seconds)
+                if err:
+                    tail = _tail_file(log_path, 40)
+                    return (
+                        f"sippy_serve process already running (pid(s) {pids}) but {err}. "
+                        f"It may still be compiling, or it may have failed to bind. "
+                        f"Log: {log_path}\n--- tail ---\n{tail}\n"
+                        "Do not start the frontend yet. Call with restart=True to restart."
+                    )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
-                f"log: {log_path}. Call with restart=True to restart."
+                f"sippy_serve already running, {ready_state} (pid(s) {pids}). "
+                f"Listen: {base_url} log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
 
@@ -467,14 +486,16 @@ async def sippy_serve(
             return f"config file not found: {cfg}"
         args.extend(["--config", str(cfg)])
 
-    host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=ready_url, ready_timeout=ready_timeout_seconds,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
-    return f"sippy_serve started and ready (pid {pid_or_err}). Listen: {host_hint} log: {log_path}"
+    return (
+        f"sippy_serve started, {ready_state} (pid {pid_or_err}). "
+        f"Listen: {base_url} log: {log_path}"
+    )
 
 
 @mcp.tool()
@@ -499,12 +520,18 @@ async def sippy_ng_start(
     log_file: str = "sippy-dev-logs/sippy_ng_start.log",
     open_browser: bool = False,
     restart: bool = False,
+    ready_timeout_seconds: int = 180,
 ) -> str:
     """Start the React dev server (``npm start`` in ``sippy-ng``) in the background.
 
     CRA defaults to port 3000. ``log_file`` is resolved relative to the repo root;
     absolute paths outside the repo are rejected. Skips starting if a matching
-    ``npm start`` / react-scripts process is already running, unless ``restart`` is True.
+    ``npm start`` / react-scripts process is already running, unless ``restart`` is True —
+    either way the dev server URL is polled before the tool reports ready, up to
+    ``ready_timeout_seconds`` (0 disables the wait).
+
+    The frontend calls the backend API as soon as it loads, so start ``sippy_serve`` and
+    wait for it to report ready first.
     """
     ng_dir = REPO_ROOT / "sippy-ng"
     if not (ng_dir / "package.json").is_file():
@@ -515,14 +542,28 @@ async def sippy_ng_start(
     except ValueError as e:
         return str(e)
 
+    ready_url = "http://127.0.0.1:3000/sippy-ng"
+    ready_state = "ready" if ready_timeout_seconds > 0 else "readiness not checked"
+
     existing = _pids_sippy_ng_dev()
     if existing:
         if not restart:
             pids = ", ".join(str(p) for p in existing)
+            if ready_timeout_seconds > 0:
+                err = await _wait_for_ready(
+                    ready_url, ready_timeout_seconds, subject="dev server"
+                )
+                if err:
+                    tail = _tail_file(log_path, 40)
+                    return (
+                        f"sippy_ng_start process already running (pid(s) {pids}) but {err}. "
+                        f"It may still be building, or it may be serving on another port. "
+                        f"Log: {log_path}\n--- tail ---\n{tail}\n"
+                        "Call with restart=True to restart."
+                    )
             return (
-                f"sippy_ng_start already running (pid(s) {pids}). "
-                f"Typical URL: http://127.0.0.1:3000/sippy-ng log: {log_path}. "
-                f"Call with restart=True to restart."
+                f"sippy_ng_start already running, {ready_state} (pid(s) {pids}). "
+                f"URL: {ready_url} log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
 
@@ -536,30 +577,71 @@ async def sippy_ng_start(
         cwd=ng_dir,
         log_path=log_path,
         env=env,
-        ready_url="http://127.0.0.1:3000/sippy-ng",
+        ready_url=ready_url,
+        ready_timeout=ready_timeout_seconds,
+        ready_subject="dev server",
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
     return (
-        f"sippy_ng_start started and ready (pid {pid_or_err}). URL: http://127.0.0.1:3000/sippy-ng "
-        f"log: {log_path}"
+        f"sippy_ng_start started, {ready_state} (pid {pid_or_err}). "
+        f"URL: {ready_url} log: {log_path}"
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
-    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+def _listen_base_url(listen: str) -> str:
+    """Return a loopback base URL for a ``--listen`` value such as ``:8080``.
+
+    Wildcard binds are rewritten to 127.0.0.1 so the value is usable both as a hint for
+    the caller and as a URL we can actually probe.
+    """
+    listen = listen.strip()
+    if listen.startswith(("http://", "https://")):
+        return listen.rstrip("/")
+    host, _, port = listen.rpartition(":")
+    if not port.isdigit():
+        return f"http://{listen}".rstrip("/")
+    if host in ("", "0.0.0.0", "::", "[::]", "*"):
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
+def _http_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
+    """Probe *url* once, returning (responding, detail describing the outcome)."""
+    try:
+        with urllib.request.urlopen(url, None, timeout) as resp:
+            return True, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, str(e)[:120] or type(e).__name__
+
+
+async def _wait_for_ready(
+    url: str,
+    timeout: int,
+    proc: subprocess.Popen | None = None,
+    subject: str = "API",
+) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    Returns an error string naming *subject*, or None once the endpoint answers. *proc* is
+    optional: when given, the wait aborts early if the process dies. The endpoint is always
+    probed at least once, so ``timeout=0`` means "check now, don't wait".
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
-        try:
-            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+    while True:
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                return f"process exited (exit {code}) while waiting for readiness"
+        responding, detail = await asyncio.to_thread(_http_probe, url)
+        if responding:
             return None
-        except Exception:
-            await asyncio.sleep(1)
-    return f"not ready after {timeout}s (checked {url})"
+        if loop.time() >= deadline:
+            return f"{subject} not responding after {timeout}s (checked {url}, last: {detail})"
+        await asyncio.sleep(1)
 
 
 async def _spawn_background(
@@ -569,11 +651,13 @@ async def _spawn_background(
     log_path: Path,
     env: dict[str, str] | None = None,
     ready_url: str | None = None,
-    ready_timeout: int = 120,
+    ready_timeout: int = 180,
+    ready_subject: str = "API",
 ) -> int | str:
     """Spawn a detached process, returning its PID or an error string.
 
     If *ready_url* is set, polls it until it responds (up to *ready_timeout* seconds).
+    A *ready_timeout* of 0 or less skips the readiness wait entirely.
     """
     _ensure_dev_log_dir()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -602,11 +686,14 @@ async def _spawn_background(
             tail = "(no log output)"
         return f"{label} exited immediately (exit {code}). Log: {log_path}\n--- tail ---\n{tail}"
 
-    if ready_url:
-        err = await _wait_for_ready(ready_url, ready_timeout, proc)
+    if ready_url and ready_timeout > 0:
+        err = await _wait_for_ready(ready_url, ready_timeout, proc, ready_subject)
         if err:
             tail = _tail_file(log_path, 40)
-            return f"{label} started (pid {proc.pid}) but {err}. Log: {log_path}\n--- tail ---\n{tail}"
+            return (
+                f"{label} process started (pid {proc.pid}) but {err}. "
+                f"Log: {log_path}\n--- tail ---\n{tail}"
+            )
 
     return proc.pid
 

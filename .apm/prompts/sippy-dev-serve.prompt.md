@@ -10,6 +10,8 @@ Defaults are derived from **`SIPPY_DATA_MODE`** (`seed` or `prod-like`). In **se
 
 Explicit parameter values always override mode-derived defaults.
 
-If the server is already running, the tool will report it. Ask the user if they want to restart, and if so call again with **`restart=True`**.
+The tool only reports success once **`GET /api/releases`** answers, so a reported "ready" means the API is actually serving. If it instead reports that the process is running but the API is not responding, treat the backend as **not** ready: check `sippy-dev-logs/sippy_serve.log`, wait, or restart. `go run` can spend a minute or more compiling; raise **`ready_timeout_seconds`** (default 300) on slow machines.
+
+If the server is already running, the tool will report it — still only after the API responds. Ask the user if they want to restart, and if so call again with **`restart=True`**.
 
 See **`mcp/server.py`** for all parameters. Typical listen address: **`:8080`**. Log: **`sippy-dev-logs/sippy_serve.log`**.

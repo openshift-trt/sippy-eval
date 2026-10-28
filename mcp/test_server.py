@@ -1,5 +1,7 @@
+import asyncio
 import os
 import tempfile
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -11,11 +13,15 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _http_probe,
+    _listen_base_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
+    sippy_serve,
 )
 
 
@@ -297,3 +303,144 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestListenBaseUrl:
+    def test_port_only(self):
+        assert _listen_base_url(":8080") == "http://127.0.0.1:8080"
+
+    def test_wildcard_host(self):
+        assert _listen_base_url("0.0.0.0:8080") == "http://127.0.0.1:8080"
+
+    def test_ipv6_wildcard(self):
+        assert _listen_base_url("[::]:8080") == "http://127.0.0.1:8080"
+
+    def test_explicit_host(self):
+        assert _listen_base_url("localhost:9000") == "http://localhost:9000"
+
+    def test_already_a_url(self):
+        assert _listen_base_url("http://sippy.local:8080/") == "http://sippy.local:8080"
+
+    def test_no_port(self):
+        assert _listen_base_url("sippy.local") == "http://sippy.local"
+
+
+class TestHttpProbe:
+    URL = "http://127.0.0.1:8080/api/releases"
+
+    def test_responding_endpoint(self):
+        resp = mock.MagicMock()
+        resp.status = 200
+        with mock.patch("server.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = resp
+            assert _http_probe(self.URL) == (True, "HTTP 200")
+
+    def test_connection_refused(self):
+        with mock.patch("server.urllib.request.urlopen", side_effect=OSError("refused")):
+            responding, detail = _http_probe(self.URL)
+        assert responding is False
+        assert "refused" in detail
+
+    def test_http_error_is_not_ready(self):
+        err = urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+        with mock.patch("server.urllib.request.urlopen", side_effect=err):
+            assert _http_probe(self.URL) == (False, "HTTP 404")
+
+    def test_server_error_is_not_ready(self):
+        err = urllib.error.HTTPError("http://x", 500, "Boom", {}, None)
+        with mock.patch("server.urllib.request.urlopen", side_effect=err):
+            assert _http_probe(self.URL) == (False, "HTTP 500")
+
+
+class TestWaitForReady:
+    URL = "http://127.0.0.1:8080/api/releases"
+
+    def test_ready_immediately(self):
+        with mock.patch("server._http_probe", return_value=(True, "HTTP 200")):
+            assert asyncio.run(_wait_for_ready(self.URL, 30)) is None
+
+    def test_probes_once_with_zero_timeout(self):
+        with mock.patch("server._http_probe", return_value=(True, "HTTP 200")) as probe:
+            assert asyncio.run(_wait_for_ready(self.URL, 0)) is None
+            assert probe.call_count == 1
+
+    def test_times_out_without_process(self):
+        with mock.patch("server._http_probe", return_value=(False, "refused")):
+            err = asyncio.run(_wait_for_ready(self.URL, 0))
+        assert "API not responding" in err
+        assert self.URL in err
+
+    def test_becomes_ready_after_retries(self):
+        probe = mock.Mock(side_effect=[(False, "refused"), (False, "refused"), (True, "HTTP 200")])
+
+        async def _no_sleep(_):
+            return None
+
+        with mock.patch("server._http_probe", probe):
+            with mock.patch("server.asyncio.sleep", _no_sleep):
+                assert asyncio.run(_wait_for_ready(self.URL, 30)) is None
+        assert probe.call_count == 3
+
+    def test_process_death_aborts_wait(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 2
+        with mock.patch("server._http_probe", return_value=(False, "refused")) as probe:
+            err = asyncio.run(_wait_for_ready(self.URL, 30, proc))
+        assert "exit 2" in err
+        assert probe.call_count == 0
+
+    def test_live_process_still_waits(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with mock.patch("server._http_probe", return_value=(True, "HTTP 200")):
+            assert asyncio.run(_wait_for_ready(self.URL, 30, proc)) is None
+
+    def test_subject_appears_in_error(self):
+        with mock.patch("server._http_probe", return_value=(False, "refused")):
+            err = asyncio.run(_wait_for_ready(self.URL, 0, subject="dev server"))
+        assert err.startswith("dev server not responding")
+
+
+class TestSippyServeReadiness:
+    """TRT-2678: a detected process must not be reported as ready on its own."""
+
+    API_URL = "http://127.0.0.1:8080/api/releases"
+
+    def _serve(self, **kwargs):
+        kwargs.setdefault("views_file", "config/seed-views.yaml")
+        kwargs.setdefault("data_provider", "postgres")
+        return asyncio.run(sippy_serve(**kwargs))
+
+    def test_existing_process_reported_ready_only_after_api_responds(self):
+        with mock.patch("server._pids_sippy_serve", return_value=[4242]):
+            with mock.patch("server._http_probe", return_value=(True, "HTTP 200")) as probe:
+                out = self._serve(ready_timeout_seconds=30)
+        probe.assert_called_with(self.API_URL)
+        assert "already running, ready" in out
+        assert "pid(s) 4242" in out
+
+    def test_existing_process_with_dead_api_is_an_error(self):
+        async def _no_sleep(_):
+            return None
+
+        with mock.patch("server._pids_sippy_serve", return_value=[4242]):
+            with mock.patch("server._http_probe", return_value=(False, "refused")):
+                with mock.patch("server.asyncio.sleep", _no_sleep):
+                    out = self._serve(ready_timeout_seconds=1)
+        assert "API not responding" in out
+        assert self.API_URL in out
+        assert "already running, ready" not in out
+        assert "Do not start the frontend yet" in out
+
+    def test_zero_timeout_skips_probe_and_does_not_claim_ready(self):
+        with mock.patch("server._pids_sippy_serve", return_value=[4242]):
+            with mock.patch("server._http_probe", return_value=(False, "refused")) as probe:
+                out = self._serve(ready_timeout_seconds=0)
+        probe.assert_not_called()
+        assert "readiness not checked" in out
+
+    def test_probe_url_follows_listen_flag(self):
+        with mock.patch("server._pids_sippy_serve", return_value=[1]):
+            with mock.patch("server._http_probe", return_value=(True, "HTTP 200")) as probe:
+                self._serve(listen="0.0.0.0:9999", ready_timeout_seconds=30)
+        probe.assert_called_with("http://127.0.0.1:9999/api/releases")
