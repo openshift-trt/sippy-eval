@@ -613,7 +613,9 @@ func (c *ComponentReportGenerator) generateComponentTestReport(basisStatusMap, s
 	keySet := sets.NewString(slices.Collect(maps.Keys(basisStatusMap))...)
 	keySet.Insert(slices.Collect(maps.Keys(sampleStatusMap))...)
 	for testKeyStr := range keySet {
-		var cellReport testdetails.TestComparison // The actual stats we return over the API
+		// The actual stats we return over the API. Explanations is initialized so it serializes
+		// as [] rather than null for code paths that never append one.
+		cellReport := testdetails.TestComparison{Explanations: []string{}}
 		sampleStatus, sampleThere := sampleStatusMap[testKeyStr]
 		basisStatus, basisThere := basisStatusMap[testKeyStr]
 

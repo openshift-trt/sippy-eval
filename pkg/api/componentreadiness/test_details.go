@@ -443,6 +443,8 @@ func (c *ComponentReportGenerator) internalGenerateTestDetailsReport(
 
 	testStats := testdetails.TestComparison{
 		RequiredConfidence: c.ReqOptions.AdvancedOption.Confidence,
+		// Initialized so it serializes as [] rather than null for code paths that never append one.
+		Explanations: []string{},
 		SampleStats: testdetails.ReleaseStats{
 			Release: c.ReqOptions.SampleRelease.Name,
 			Start:   &c.ReqOptions.SampleRelease.Start,

@@ -157,6 +157,15 @@ var (
 	}
 )
 
+// assertNoNullExplanations guards TRT-2660: a nil Explanations slice marshals to JSON null,
+// and the component readiness UI calls .length on it when rendering severity icon tooltips.
+func assertNoNullExplanations(t *testing.T, report any) {
+	serialized, err := json.Marshal(report)
+	assert.NoError(t, err, "error marshalling report")
+	assert.NotContains(t, string(serialized), `"explanations":null`,
+		"explanations must be initialized so they serialize as [] rather than null")
+}
+
 func filterColumnIDByDefault(id crtest.ColumnIdentification) crtest.ColumnIdentification {
 	ret := crtest.ColumnIdentification{Variants: map[string]string{}}
 	for _, variant := range strings.Split(DefaultDBGroupBy, ",") {
@@ -1198,6 +1207,7 @@ func TestGenerateComponentReport(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			report, err := tc.generator.generateComponentTestReport(tc.baseStatus, tc.sampleStatus)
 			assert.NoError(t, err, "error generating component report")
+			assertNoNullExplanations(t, report)
 
 			// WARNING: PC and Mac differ on floating point comparisons when you get far enough into the precision.
 			// We need to do fuzzy floating point comparisons which poses a problem for the way these tests are
@@ -1623,6 +1633,8 @@ func TestGenerateComponentTestDetailsReport(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			report := tc.generator.internalGenerateTestDetailsReport("", nil, nil, baseStats, sampleStats, tc.generator.ReqOptions.TestIDOptions[0])
+			assertNoNullExplanations(t, report)
+			assert.NotNil(t, report.Analyses[0].Explanations, "explanations must never be nil")
 			assert.Equal(t, tc.expectedReport.RowIdentification, report.RowIdentification, "expected report row identification %+v, got %+v", tc.expectedReport.RowIdentification, report.RowIdentification)
 			assert.Equal(t, tc.expectedReport.ColumnIdentification, report.ColumnIdentification, "expected report column identification %+v, got %+v", tc.expectedReport.ColumnIdentification, report.ColumnIdentification)
 			assert.Equal(t, tc.expectedReport.Analyses[0].BaseStats, report.Analyses[0].BaseStats, "expected report base stats %+v, got %+v", tc.expectedReport.Analyses[0].BaseStats, report.Analyses[0].BaseStats)
