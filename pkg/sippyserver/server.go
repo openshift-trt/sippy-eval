@@ -2262,6 +2262,17 @@ func (s *Server) Serve() {
 		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fs))).ServeHTTP(w, r)
 	})
 
+	// Redirect /sippy-ng to /sippy-ng/ so the SPA loads correctly on first visit.
+	// This must be registered after the PathPrefix("/sippy-ng/") route so that
+	// /sippy-ng/ is handled by PathPrefix first, avoiding a StrictSlash redirect loop.
+	router.Path("/sippy-ng").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := "/sippy-ng/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
 	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(s.static)))
 
 	// Setup MCP Server
