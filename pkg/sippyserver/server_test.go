@@ -2,16 +2,72 @@ package sippyserver
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
 	"github.com/openshift/sippy/pkg/db/models"
 )
+
+func TestFrontendRoutes(t *testing.T) {
+	const index = "<html><div id=\"root\"></div></html>"
+	const script = "console.log('sippy')"
+	frontendFS, err := fs.Sub(fstest.MapFS{
+		"build/index.html":        {Data: []byte(index)},
+		"build/static/js/main.js": {Data: []byte(script)},
+	}, "build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{sippyNG: frontendFS}
+	router := mux.NewRouter().StrictSlash(true)
+	s.registerFrontendRoutes(router)
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		method   string
+		status   int
+		location string
+		body     string
+	}{
+		{name: "bare path", path: "/sippy-ng", status: http.StatusMovedPermanently, location: "/sippy-ng/"},
+		{name: "query preserved", path: "/sippy-ng?release=4.20&filter=a%2Fb&filter=c+d", status: http.StatusMovedPermanently, location: "/sippy-ng/?release=4.20&filter=a%2Fb&filter=c+d"},
+		{name: "head redirect", method: http.MethodHead, path: "/sippy-ng", status: http.StatusMovedPermanently, location: "/sippy-ng/"},
+		{name: "canonical path", path: "/sippy-ng/", status: http.StatusOK, body: index},
+		{name: "canonical query", path: "/sippy-ng/?release=4.20", status: http.StatusOK, body: index},
+		{name: "deep link", path: "/sippy-ng/component_readiness/main?view=4.20", status: http.StatusOK, body: index},
+		{name: "deep link trailing slash", path: "/sippy-ng/jobs/4.20/", status: http.StatusOK, body: index},
+		{name: "static asset", path: "/sippy-ng/static/js/main.js", status: http.StatusOK, body: script},
+		{name: "unrelated prefix", path: "/sippy-ng-other", status: http.StatusNotFound},
+		{name: "unrelated route", path: "/api/health", status: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			method := tc.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(method, tc.path, nil))
+			if response.Code != tc.status {
+				t.Fatalf("status = %d, want %d", response.Code, tc.status)
+			}
+			if location := response.Header().Get("Location"); location != tc.location {
+				t.Errorf("Location = %q, want %q", location, tc.location)
+			}
+			if tc.body != "" && response.Body.String() != tc.body {
+				t.Errorf("body = %q, want %q", response.Body.String(), tc.body)
+			}
+		})
+	}
+}
 
 func TestValidateProwJobRun(t *testing.T) {
 

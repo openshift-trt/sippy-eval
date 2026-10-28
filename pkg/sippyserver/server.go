@@ -2235,19 +2235,15 @@ func (s *Server) rateLimit(endpointPath string, maxRequests int, period time.Dur
 	}
 }
 
-func (s *Server) Serve() {
-	s.determineCapabilities()
-
-	router := mux.NewRouter()
-	router.StrictSlash(true)
-
+func (s *Server) registerFrontendRoutes(router *mux.Router) {
 	// Handle serving React version of frontend with support for browser router, i.e. anything not found
 	// goes to index.html
-	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fs := s.sippyNG
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		frontendFS := s.sippyNG
 		if r.URL.Path != "/sippy-ng/" {
-			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
-			if _, err := fs.Open(fullPath); err != nil {
+			// Filesystem paths cannot end in a slash, including SPA deep links.
+			fullPath := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sippy-ng/"), "/")
+			if _, err := frontendFS.Open(fullPath); err != nil {
 				if !os.IsNotExist(err) {
 					w.WriteHeader(http.StatusNotFound)
 					w.Header().Set("Content-Type", "text/plain")
@@ -2259,8 +2255,20 @@ func (s *Server) Serve() {
 				r.URL.Path = "/sippy-ng/"
 			}
 		}
-		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fs))).ServeHTTP(w, r)
-	})
+		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(frontendFS))).ServeHTTP(w, r)
+	}
+	// StrictSlash only redirects exact routes, not PathPrefix routes.
+	router.HandleFunc("/sippy-ng/", handler)
+	router.PathPrefix("/sippy-ng/").HandlerFunc(handler)
+}
+
+func (s *Server) Serve() {
+	s.determineCapabilities()
+
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	s.registerFrontendRoutes(router)
 
 	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(s.static)))
 

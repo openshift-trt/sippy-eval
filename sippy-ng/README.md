@@ -14,6 +14,10 @@ for quicker feedback (Sippy will listen on `:8080`, and when run with
 
 You can browse to your local UI at http://localhost:3000/sippy-ng.
 
+The embedded UI is served at `/sippy-ng/`. Requests to `/sippy-ng` redirect
+to `/sippy-ng/`, preserving query parameters, including on the first visit.
+Deep links under `/sippy-ng/` are served by the same React application.
+
 If you are just working on the UI, you can have the UI connect to the production Sippy API server.
 To do this, change the [sippy-ng/.env.development](.env.development) file to contain:
 
