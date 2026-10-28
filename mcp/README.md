@@ -59,6 +59,14 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 `sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
 
+`sippy_serve` waits up to **120 seconds** for a successful `GET /api/releases` before
+reporting ready, including when it finds an existing backend process that may still
+be compiling or initializing. HTTP errors and connection failures are retried. If
+the API does not respond successfully before the timeout, the tool returns an error
+with the checked URL, PID(s), log path, and log tail. The process remains running;
+inspect the log and call `sippy_serve` again to recheck readiness, or use
+`restart=True` to restart it. Only start the frontend after backend readiness succeeds.
+
 ## Cursor skills
 
 Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
