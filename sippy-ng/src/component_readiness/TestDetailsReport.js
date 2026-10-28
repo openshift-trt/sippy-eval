@@ -25,7 +25,7 @@ import {
 } from './CompReadyUtils'
 import { CompReadyVarsContext } from './CompReadyVars'
 import { FileCopy, Help } from '@mui/icons-material'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { pathForExactTestAnalysisWithFilter } from '../helpers'
 import { ReleasesContext, SippyCapabilitiesContext } from '../App'
 import { usePageContextForChat } from '../chat/store/useChatStore'
@@ -148,16 +148,13 @@ export default function TestDetailsReport(props) {
   // We are assuming the API query params are identical to the UI query params, but we have to adjust the host port and prefix from
   // http://localhost:3000/sippy-ng/ to http://localhost:8080/api/
   // This hack allows us to keep the param generation logic in one place. (server side)
-  const currentUrl = window.location.href
-  const sippyNgIndex = currentUrl.indexOf('/sippy-ng/')
-  let testDetailsApiCall
-  if (sippyNgIndex !== -1) {
-    const pathAfterSippyNg = currentUrl.substring(sippyNgIndex + 10) // +10 to skip '/sippy-ng/'
-    // We have to format the url to RFC3339Time in case the date picker has been used to update report params
-    testDetailsApiCall = makeRFC3339Time(getAPIUrl(pathAfterSippyNg))
-  } else {
-    console.error('No /sippy-ng/ found in URL, this is a bug')
-  }
+  // useLocation is relative to the router basename, so it gives us the path without the
+  // /sippy-ng prefix regardless of how the app was mounted or how the URL was spelled.
+  const location = useLocation()
+  // We have to format the url to RFC3339Time in case the date picker has been used to update report params
+  const testDetailsApiCall = makeRFC3339Time(
+    getAPIUrl(location.pathname.replace(/^\//, '') + location.search)
+  )
 
   useEffect(() => {
     setIsLoaded(false)

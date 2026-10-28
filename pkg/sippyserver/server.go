@@ -72,6 +72,16 @@ const (
 	ModeKubernetes Mode = "kube"
 )
 
+const (
+	// sippyNGRoot is the path the React single page app is mounted at, without a trailing
+	// slash. It must stay in sync with the BrowserRouter basename in sippy-ng/src/index.js.
+	sippyNGRoot = "/sippy-ng"
+
+	// sippyNGPathPrefix is the canonical, trailing slash form of sippyNGRoot. It must stay in
+	// sync with the homepage field in sippy-ng/package.json.
+	sippyNGPathPrefix = sippyNGRoot + "/"
+)
+
 func NewServer(
 	mode Mode,
 	listenAddr string,
@@ -2235,32 +2245,73 @@ func (s *Server) rateLimit(endpointPath string, maxRequests int, period time.Dur
 	}
 }
 
+// registerSippyNGRoutes mounts the React single page app served out of fsys.
+func registerSippyNGRoutes(router *mux.Router, fsys fs.FS) {
+	// Handle serving React version of frontend with support for browser router, i.e. anything not
+	// found goes to index.html
+	router.PathPrefix(sippyNGPathPrefix).HandlerFunc(sippyNGHandler(fsys))
+
+	// gorilla/mux disables StrictSlash for prefix routes, so "/sippy-ng" does not match the route
+	// above and would otherwise fall through to the catch-all and 404. Normalize it to the
+	// canonical trailing slash form the React app and its asset URLs are built against. Matching on
+	// the exact path rather than with Path() is deliberate: under StrictSlash, Path("/sippy-ng")
+	// compiles to ^/sippy-ng[/]?$ and so also matches "/sippy-ng/", which mux would then bounce
+	// back here, looping between the two redirects.
+	router.NewRoute().MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+		return r.URL.Path == sippyNGRoot
+	}).HandlerFunc(redirectToSippyNGRoot)
+}
+
+// redirectToSippyNGRoot sends "/sippy-ng" to "/sippy-ng/", keeping any query string so that
+// deep links behind a reverse proxy survive the normalization.
+func redirectToSippyNGRoot(w http.ResponseWriter, r *http.Request) {
+	target := sippyNGPathPrefix
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusMovedPermanently)
+}
+
+// sippyNGHandler serves the React single page app out of fsys. Anything that is not a file we
+// actually ship is rewritten to the app root so the browser router can resolve it client side.
+func sippyNGHandler(fsys fs.FS) http.HandlerFunc {
+	fileServer := http.StripPrefix(sippyNGPathPrefix, http.FileServer(http.FS(fsys)))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isSippyNGAsset(fsys, strings.TrimPrefix(r.URL.Path, sippyNGPathPrefix)) {
+			r.URL.Path = sippyNGPathPrefix
+		}
+		fileServer.ServeHTTP(w, r)
+	}
+}
+
+// isSippyNGAsset reports whether name is a static file shipped with the React build. A trailing
+// slash is tolerated because client side routes may carry one (e.g. "/sippy-ng/chat/"), and
+// directories are not assets: serving them would expose a listing instead of the app.
+func isSippyNGAsset(fsys fs.FS, name string) bool {
+	name = strings.TrimSuffix(name, "/")
+	if name == "" {
+		return false
+	}
+
+	info, err := fs.Stat(fsys, name)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.WithError(err).WithField("path", name).Debug("could not stat sippy-ng asset, treating as a client side route")
+		}
+		return false
+	}
+
+	return !info.IsDir()
+}
+
 func (s *Server) Serve() {
 	s.determineCapabilities()
 
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
-	// Handle serving React version of frontend with support for browser router, i.e. anything not found
-	// goes to index.html
-	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fs := s.sippyNG
-		if r.URL.Path != "/sippy-ng/" {
-			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
-			if _, err := fs.Open(fullPath); err != nil {
-				if !os.IsNotExist(err) {
-					w.WriteHeader(http.StatusNotFound)
-					w.Header().Set("Content-Type", "text/plain")
-					if _, err := fmt.Fprintf(w, "404 Not Found: %s", fullPath); err != nil { //nolint:gosec // G705: Content-Type is text/plain (set on line above), browsers will not execute script in plain text
-						log.WithError(err).Warningf("could not write response")
-					}
-					return
-				}
-				r.URL.Path = "/sippy-ng/"
-			}
-		}
-		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fs))).ServeHTTP(w, r)
-	})
+	registerSippyNGRoutes(router, s.sippyNG)
 
 	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(s.static)))
 
@@ -2878,7 +2929,7 @@ func (s *Server) Serve() {
 		if _, err := s.static.Open(filePath); err != nil {
 			// File doesn't exist in static, redirect to sippy-ng
 			if r.URL.Path == "/" {
-				http.Redirect(w, r, "/sippy-ng/", http.StatusMovedPermanently)
+				http.Redirect(w, r, sippyNGPathPrefix, http.StatusMovedPermanently)
 			} else {
 				http.NotFound(w, r)
 			}
