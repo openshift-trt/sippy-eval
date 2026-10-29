@@ -415,11 +415,19 @@ async def sippy_serve(
     if not views.is_file():
         return f"views file not found: {views}"
 
+    host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+
     existing = _pids_sippy_serve()
     if existing:
         if not restart:
-            host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _wait_for_url_ready(host_hint, 120, existing[0])
+            if err:
+                tail = _tail_file(log_path, 40)
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but {err}. "
+                    f"Log: {log_path}. Call with restart=True to restart.\n--- tail ---\n{tail}"
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -467,7 +475,6 @@ async def sippy_serve(
             return f"config file not found: {cfg}"
         args.extend(["--config", str(cfg)])
 
-    host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
         ready_url=host_hint,
@@ -546,20 +553,32 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
-    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+async def _wait_for_url_ready(url: str, timeout: int, pid: int) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse.
+
+    Returns early with an error if *pid* disappears. Returns ``None`` on success.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return f"process {pid} exited while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None
         except Exception:
             await asyncio.sleep(1)
     return f"not ready after {timeout}s (checked {url})"
+
+
+async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+    code = proc.poll()
+    if code is not None:
+        return f"process exited (exit {code}) while waiting for readiness"
+    return await _wait_for_url_ready(url, timeout, proc.pid)
 
 
 async def _spawn_background(

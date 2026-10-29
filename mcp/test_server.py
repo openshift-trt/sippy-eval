@@ -1,5 +1,8 @@
+import asyncio
+import http.server
 import os
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +19,7 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_url_ready,
 )
 
 
@@ -297,3 +301,38 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestWaitForUrlReady:
+    def test_returns_none_when_url_responds(self):
+        class _OK(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _OK)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        try:
+            result = asyncio.run(_wait_for_url_ready(f"http://127.0.0.1:{port}", 5, os.getpid()))
+            assert result is None
+        finally:
+            server.server_close()
+
+    def test_returns_error_when_pid_disappears(self):
+        import subprocess as sp
+
+        proc = sp.Popen(["true"])
+        proc.wait()
+        pid = proc.pid
+        result = asyncio.run(_wait_for_url_ready("http://127.0.0.1:1", 5, pid))
+        assert "exited while waiting" in result
+        assert str(pid) in result
+
+    def test_returns_timeout_error_when_url_never_responds(self):
+        result = asyncio.run(_wait_for_url_ready("http://127.0.0.1:1", 2, os.getpid()))
+        assert "not ready after 2s" in result
