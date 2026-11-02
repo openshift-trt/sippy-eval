@@ -68,9 +68,7 @@ export default function TestRegressionsTable({
     if (variantFilters.length === 0) return filtered
 
     return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
+      const variantValues = regression.variants || []
 
       return variantFilters.every((filter) => {
         const hasMatch = variantValues.some(
