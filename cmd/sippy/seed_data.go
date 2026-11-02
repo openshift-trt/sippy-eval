@@ -565,6 +565,16 @@ func seedSyntheticData(dbc *db.DB) error {
 	}
 	log.Info("Seeded GA raw test data")
 
+	if err := seedReleasePayloadTags(dbc); err != nil {
+		return errors.WithMessage(err, "failed to seed release payload tags")
+	}
+	log.Info("Seeded release payload tags")
+
+	if err := seedPeriodicTestOutputs(dbc); err != nil {
+		return errors.WithMessage(err, "failed to seed periodic test outputs")
+	}
+	log.Info("Seeded periodic test outputs")
+
 	if err := sippyserver.RefreshData(dbc, nil, sippyserver.RefreshOptions{}); err != nil {
 		return fmt.Errorf("failed to refresh data: %w", err)
 	}
@@ -573,6 +583,11 @@ func seedSyntheticData(dbc *db.DB) error {
 	if err := syncRegressions(dbc); err != nil {
 		return errors.WithMessage(err, "failed to sync regressions")
 	}
+
+	if err := seedBugsAndTriages(dbc); err != nil {
+		return errors.WithMessage(err, "failed to seed bugs and triages")
+	}
+	log.Info("Seeded bugs and triages")
 
 	log.Infof("Seeded synthetic data: %d ProwJobRuns, %d test results across %d releases",
 		totalRuns, totalResults, len(syntheticReleases))
@@ -913,7 +928,17 @@ func syncRegressions(dbc *db.DB) error {
 	backend := componentreadiness.NewPostgresRegressionStore(dbc, nil)
 	rLog := log.WithField("source", "seed-regression-sync")
 
+	type releaseResult struct {
+		activeIDs     sets.Set[uint]
+		activeViewMap map[uint][]string
+	}
+	releaseResults := map[string]*releaseResult{}
+
 	for _, view := range views.ComponentReadiness {
+		if !view.RegressionTracking.Enabled {
+			continue
+		}
+
 		baseRelease, err := utils.GetViewReleaseOptions(releases, "basis", view.BaseRelease, 0, 0)
 		if err != nil {
 			return fmt.Errorf("error getting base release for view %s: %w", view.Name, err)
@@ -948,26 +973,40 @@ func syncRegressions(dbc *db.DB) error {
 			}
 		}
 
-		// Close regressions no longer in the report
-		allRegs, err := backend.ListCurrentRegressionsForRelease(view.SampleRelease.Name)
+		release := view.SampleRelease.Name
+		if _, ok := releaseResults[release]; !ok {
+			releaseResults[release] = &releaseResult{
+				activeIDs:     sets.New[uint](),
+				activeViewMap: make(map[uint][]string),
+			}
+		}
+		for _, reg := range activeRegs {
+			releaseResults[release].activeIDs.Insert(reg.ID)
+			releaseResults[release].activeViewMap[reg.ID] = append(
+				releaseResults[release].activeViewMap[reg.ID], view.Name)
+		}
+
+		rLog.Infof("synced regressions for view %s: %d active", view.Name, len(activeRegs))
+	}
+
+	now := time.Now()
+	for release, result := range releaseResults {
+		allRegs, err := backend.ListCurrentRegressionsForRelease(release)
 		if err != nil {
-			return fmt.Errorf("error listing regressions: %w", err)
+			return fmt.Errorf("error listing regressions for release %s: %w", release, err)
 		}
-		activeIDs := map[uint]bool{}
-		for _, r := range activeRegs {
-			activeIDs[r.ID] = true
-		}
-		now := time.Now()
 		for _, reg := range allRegs {
-			if !activeIDs[reg.ID] && !reg.Closed.Valid {
+			if !result.activeIDs.Has(reg.ID) && !reg.Closed.Valid {
 				reg.Closed = sql.NullTime{Valid: true, Time: now}
 				if err := backend.UpdateRegression(reg); err != nil {
 					return fmt.Errorf("error closing regression %d: %w", reg.ID, err)
 				}
 			}
 		}
-
-		rLog.Infof("synced regressions for view %s: %d active", view.Name, len(activeRegs))
+		allIDs := result.activeIDs.UnsortedList()
+		if err := backend.DeactivateRolledOffViews(allIDs, result.activeViewMap); err != nil {
+			return fmt.Errorf("error deactivating rolled-off views for release %s: %w", release, err)
+		}
 	}
 
 	if err := backend.ResolveTriages(); err != nil {
@@ -1475,5 +1514,320 @@ func seedGARawTestData(dbc *db.DB) error {
 	log.WithField("rows", len(rows)).
 		WithField("releases", len(gaReleases)).
 		Info("Seeded GA raw test data")
+	return nil
+}
+
+func seedReleasePayloadTags(dbc *db.DB) error {
+	now := time.Now().UTC().Truncate(time.Hour)
+
+	type tagDef struct {
+		release     string
+		stream      string
+		arch        string
+		phase       string
+		releaseTime time.Time
+		previousTag string
+	}
+
+	tags := []tagDef{
+		// 4.22 nightly: two Accepted payloads and one Rejected
+		{release: "4.22", stream: "nightly", arch: "amd64", phase: "Accepted",
+			releaseTime: now.Add(-48 * time.Hour)},
+		{release: "4.22", stream: "nightly", arch: "amd64", phase: "Accepted",
+			releaseTime: now.Add(-24 * time.Hour)},
+		{release: "4.22", stream: "nightly", arch: "amd64", phase: "Rejected",
+			releaseTime: now.Add(-12 * time.Hour)},
+		// 4.21 nightly: one Accepted payload
+		{release: "4.21", stream: "nightly", arch: "amd64", phase: "Accepted",
+			releaseTime: now.Add(-35 * 24 * time.Hour)},
+	}
+
+	// Build tag names and resolve previous-tag references
+	var createdTags []models.ReleaseTag
+	acceptedByReleaseStream := map[string]string{}
+
+	for _, td := range tags {
+		tagName := fmt.Sprintf("%s.0-0.%s-%s",
+			td.release, td.stream, td.releaseTime.Format("2006-01-02-150405"))
+		key := td.release + "/" + td.stream
+
+		prevTag := acceptedByReleaseStream[key]
+		if td.phase == "Accepted" {
+			acceptedByReleaseStream[key] = tagName
+		}
+
+		rt := models.ReleaseTag{
+			ReleaseTag:         tagName,
+			Release:            td.release,
+			Stream:             td.stream,
+			Architecture:       td.arch,
+			Phase:              td.phase,
+			ReleaseTime:        td.releaseTime,
+			PreviousReleaseTag: prevTag,
+			KubernetesVersion:  "v1.31.0",
+			CurrentOSVersion:   "418.94.202410010000-0",
+		}
+		if td.phase == "Rejected" {
+			rt.RejectReason = "TestFailure"
+			rt.RejectReasonNote = "Seeded rejection for testing"
+			rt.RejectReasons = pq.StringArray{"TestFailure"}
+		}
+		if err := dbc.DB.Create(&rt).Error; err != nil {
+			return fmt.Errorf("creating release tag %s: %w", tagName, err)
+		}
+		createdTags = append(createdTags, rt)
+	}
+
+	// Add pull requests to the most recent 4.22 Accepted tag
+	var recentAccepted *models.ReleaseTag
+	for i := range createdTags {
+		if createdTags[i].Release == "4.22" && createdTags[i].Phase == "Accepted" {
+			recentAccepted = &createdTags[i]
+		}
+	}
+	if recentAccepted != nil {
+		prs := []models.ReleasePullRequest{
+			{URL: "https://github.com/openshift/origin/pull/28001", PullRequestID: "28001",
+				Name: "origin", Description: "Fix node lifecycle controller race condition"},
+			{URL: "https://github.com/openshift/installer/pull/7501", PullRequestID: "7501",
+				Name: "installer", Description: "Add support for dual-stack VPC configuration"},
+		}
+		for i := range prs {
+			if err := dbc.DB.Create(&prs[i]).Error; err != nil {
+				return fmt.Errorf("creating release pull request: %w", err)
+			}
+		}
+		if err := dbc.DB.Model(recentAccepted).Association("PullRequests").Append(&prs); err != nil {
+			return fmt.Errorf("associating pull requests with release tag: %w", err)
+		}
+
+		repos := []models.ReleaseRepository{
+			{Name: "origin", ReleaseTagID: fmt.Sprintf("%d", recentAccepted.ID),
+				Head: "abc123def456789", DiffURL: "https://github.com/openshift/origin/compare/aaa...bbb"},
+			{Name: "installer", ReleaseTagID: fmt.Sprintf("%d", recentAccepted.ID),
+				Head: "789abc012def345", DiffURL: "https://github.com/openshift/installer/compare/ccc...ddd"},
+		}
+		for _, repo := range repos {
+			if err := dbc.DB.Create(&repo).Error; err != nil {
+				return fmt.Errorf("creating release repository: %w", err)
+			}
+		}
+	}
+
+	// Add job runs to each release tag
+	for i := range createdTags {
+		tag := &createdTags[i]
+		jobRunState := "success"
+		if tag.Phase == "Rejected" {
+			jobRunState = "failure"
+		}
+		jobRuns := []models.ReleaseJobRun{
+			{
+				ReleaseTagID:   fmt.Sprintf("%d", tag.ID),
+				Name:           uint(1000 + i*10 + 1),
+				JobName:        fmt.Sprintf("periodic-ci-openshift-release-master-ci-%s-e2e-aws-ovn-amd64", tag.Release),
+				Kind:           "periodic",
+				State:          jobRunState,
+				TransitionTime: tag.ReleaseTime.Add(-1 * time.Hour),
+				URL:            fmt.Sprintf("https://prow.ci.openshift.org/view/gs/test/%d", 1000+i*10+1),
+			},
+			{
+				ReleaseTagID:   fmt.Sprintf("%d", tag.ID),
+				Name:           uint(1000 + i*10 + 2),
+				JobName:        fmt.Sprintf("periodic-ci-openshift-release-master-ci-%s-upgrade-from-stable-4.21-e2e-aws-ovn-upgrade", tag.Release),
+				Kind:           "periodic",
+				State:          jobRunState,
+				TransitionTime: tag.ReleaseTime.Add(-2 * time.Hour),
+				Upgrade:        true,
+				UpgradesFrom:   "4.21",
+				UpgradesTo:     tag.Release,
+				URL:            fmt.Sprintf("https://prow.ci.openshift.org/view/gs/test/%d", 1000+i*10+2),
+			},
+		}
+		for _, jr := range jobRuns {
+			if err := dbc.DB.Create(&jr).Error; err != nil {
+				return fmt.Errorf("creating release job run: %w", err)
+			}
+		}
+	}
+
+	log.WithField("tags", len(createdTags)).Info("Seeded release payload tags")
+	return nil
+}
+
+func seedPeriodicTestOutputs(dbc *db.DB) error {
+	now := time.Now().UTC().Truncate(time.Hour)
+
+	var etcdTest models.Test
+	if err := dbc.DB.Where("name = ?", "[sig-etcd] etcd leader changes are not excessive").
+		First(&etcdTest).Error; err != nil {
+		return fmt.Errorf("looking up etcd test: %w", err)
+	}
+
+	var failedResults []models.ProwJobRunTest
+	if err := dbc.DB.
+		Where("test_id = ? AND status = ? AND prow_job_run_release = ? AND prow_job_run_timestamp > ?",
+			etcdTest.ID, int(v1.TestStatusFailure), "4.22", now.Add(-14*24*time.Hour)).
+		Limit(3).
+		Find(&failedResults).Error; err != nil {
+		return fmt.Errorf("querying failed test results: %w", err)
+	}
+
+	outputs := []string{
+		"Expected pod to be running but got CrashLoopBackOff after 5m: container exited with code 137",
+		"Timed out waiting for etcd leader election to stabilize: context deadline exceeded after 10m",
+		"Network policy enforcement failed: ingress rule not applied to new pod within 30s timeout",
+	}
+
+	for i, result := range failedResults {
+		output := models.ProwJobRunTestOutput{
+			ProwJobRunTestID:        result.ID,
+			Output:                  outputs[i%len(outputs)],
+			ProwJobRunTestTimestamp: result.ProwJobRunTimestamp,
+			ProwJobRunTestRelease:   result.ProwJobRunRelease,
+		}
+		if err := dbc.DB.Create(&output).Error; err != nil {
+			return fmt.Errorf("creating periodic test output: %w", err)
+		}
+	}
+
+	log.WithField("outputs", len(failedResults)).Info("Seeded periodic test outputs")
+	return nil
+}
+
+func seedBugsAndTriages(dbc *db.DB) error {
+	now := time.Now().UTC()
+
+	bugs := []models.Bug{
+		{
+			Key:             "OCPBUGS-99001",
+			Status:          "NEW",
+			LastChangeTime:  now.Add(-24 * time.Hour),
+			Summary:         "etcd leader changes excessive during upgrade",
+			AffectsVersions: pq.StringArray{"4.22"},
+			FixVersions:     pq.StringArray{"4.22"},
+			TargetVersions:  pq.StringArray{"4.22"},
+			Components:      pq.StringArray{"etcd"},
+			URL:             "https://issues.redhat.com/browse/OCPBUGS-99001",
+		},
+		{
+			Key:             "OCPBUGS-99002",
+			Status:          "ASSIGNED",
+			LastChangeTime:  now.Add(-48 * time.Hour),
+			Summary:         "Network service endpoint failures on dual-stack clusters",
+			AffectsVersions: pq.StringArray{"4.22"},
+			FixVersions:     pq.StringArray{"4.22"},
+			TargetVersions:  pq.StringArray{"4.22"},
+			Components:      pq.StringArray{"Networking"},
+			URL:             "https://issues.redhat.com/browse/OCPBUGS-99002",
+		},
+	}
+	for i := range bugs {
+		if err := dbc.DB.Create(&bugs[i]).Error; err != nil {
+			return fmt.Errorf("creating bug %s: %w", bugs[i].Key, err)
+		}
+	}
+
+	// Find regressions created by syncRegressions for the extreme regression test.
+	// This test regresses on both aws/amd64 (in 4.22-main) and aws/arm64 (in 4.22-arm64).
+	var extremeRegs []models.TestRegression
+	if err := dbc.DB.Where("test_name = ? AND release = ? AND closed IS NULL",
+		"[sig-etcd] etcd leader changes are not excessive", "4.22").
+		Find(&extremeRegs).Error; err != nil {
+		return fmt.Errorf("querying extreme regressions: %w", err)
+	}
+
+	// Find the significant regression test (only in 4.22-main view, not in arm64 view)
+	var sigRegs []models.TestRegression
+	if err := dbc.DB.Where("test_name = ? AND release = ? AND closed IS NULL",
+		"[sig-network] Services should serve endpoints on same port and different protocol", "4.22").
+		Find(&sigRegs).Error; err != nil {
+		return fmt.Errorf("querying significant regressions: %w", err)
+	}
+
+	// Create a triage spanning the extreme regressions (present in both views)
+	if len(extremeRegs) > 0 {
+		triage := models.Triage{
+			URL:         bugs[0].URL,
+			Description: bugs[0].Summary,
+			Type:        models.TriageTypeProduct,
+			BugID:       &bugs[0].ID,
+			Regressions: extremeRegs,
+		}
+		ctx := context.WithValue(context.Background(), models.CurrentUserKey, "seed-data")
+		if err := dbc.DB.WithContext(ctx).Create(&triage).Error; err != nil {
+			return fmt.Errorf("creating triage for extreme regressions: %w", err)
+		}
+
+		// Add regression job runs with labels and symptoms for each regression
+		for _, reg := range extremeRegs {
+			jobRuns := []models.RegressionJobRun{
+				{
+					RegressionID: reg.ID,
+					ProwJobRunID: fmt.Sprintf("seed-jr-%d-1", reg.ID),
+					ProwJobName:  "periodic-ci-openshift-release-master-ci-4.22-e2e-aws-ovn-amd64",
+					ProwJobURL:   "https://prow.ci.openshift.org/view/gs/test/seed-jr-1",
+					StartTime:    now.Add(-36 * time.Hour),
+					TestFailed:   true,
+					TestFailures: 3,
+					JobLabels:    pq.StringArray{"ClusterDNSFlake"},
+					JobSymptoms:  pq.StringArray{"DNSTimeoutSymptom"},
+				},
+				{
+					RegressionID: reg.ID,
+					ProwJobRunID: fmt.Sprintf("seed-jr-%d-2", reg.ID),
+					ProwJobName:  "periodic-ci-openshift-release-master-ci-4.22-e2e-aws-ovn-amd64",
+					ProwJobURL:   "https://prow.ci.openshift.org/view/gs/test/seed-jr-2",
+					StartTime:    now.Add(-24 * time.Hour),
+					TestFailed:   true,
+					TestFailures: 2,
+					JobLabels:    pq.StringArray{"ClusterDNSFlake"},
+					JobSymptoms:  pq.StringArray{"DNSTimeoutSymptom"},
+				},
+			}
+			for _, jr := range jobRuns {
+				if err := dbc.DB.Create(&jr).Error; err != nil {
+					return fmt.Errorf("creating regression job run: %w", err)
+				}
+			}
+
+			// Add triage symptoms
+			ts := models.TriageSymptom{
+				TriageID:     triage.ID,
+				SymptomID:    "DNSTimeoutSymptom",
+				RegressionID: reg.ID,
+				JobRunCount:  2,
+			}
+			if err := dbc.DB.Create(&ts).Error; err != nil {
+				return fmt.Errorf("creating triage symptom: %w", err)
+			}
+		}
+		log.WithField("regressions", len(extremeRegs)).Info("Created triage spanning multiple views")
+	}
+
+	// Leave the significant regression untriaged so it appears as a potential match
+	if len(sigRegs) > 0 {
+		for _, reg := range sigRegs {
+			jobRuns := []models.RegressionJobRun{
+				{
+					RegressionID: reg.ID,
+					ProwJobRunID: fmt.Sprintf("seed-sig-jr-%d-1", reg.ID),
+					ProwJobName:  "periodic-ci-openshift-release-master-ci-4.22-e2e-aws-ovn-amd64",
+					ProwJobURL:   "https://prow.ci.openshift.org/view/gs/test/seed-sig-jr-1",
+					StartTime:    now.Add(-30 * time.Hour),
+					TestFailed:   true,
+					TestFailures: 5,
+				},
+			}
+			for _, jr := range jobRuns {
+				if err := dbc.DB.Create(&jr).Error; err != nil {
+					return fmt.Errorf("creating regression job run for significant regression: %w", err)
+				}
+			}
+		}
+		log.WithField("regressions", len(sigRegs)).Info("Left significant regressions untriaged as potential matches")
+	}
+
+	log.WithField("bugs", len(bugs)).Info("Seeded bugs and triages")
 	return nil
 }
