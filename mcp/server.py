@@ -377,11 +377,15 @@ async def sippy_serve(
     enable_write_endpoints: bool = True,
     data_provider: str | None = None,
     restart: bool = False,
+    ready_timeout: int = 120,
 ) -> str:
     """Start the Sippy HTTP server (``go run ./cmd/sippy serve``) in the background.
 
     Long-running: returns after spawn with PID, log path, and listen address. Skips starting
     if a matching ``sippy serve`` process is already running, unless ``restart`` is True.
+    When a process is already detected, the tool polls the HTTP API to confirm it is actually
+    accepting requests before reporting ready. If the API does not respond within
+    ``ready_timeout`` seconds, an error is returned instead.
 
     Defaults are derived from ``SIPPY_DATA_MODE`` (``seed`` or ``prod-like``):
 
@@ -420,6 +424,13 @@ async def sippy_serve(
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            err = await _poll_url(host_hint, ready_timeout)
+            if err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API {err}. "
+                    f"Listen: {host_hint} log: {log_path}. "
+                    f"The backend may still be compiling. Call with restart=True to restart."
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -470,7 +481,7 @@ async def sippy_serve(
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=host_hint, ready_timeout=ready_timeout,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -554,6 +565,19 @@ async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str
         code = proc.poll()
         if code is not None:
             return f"process exited (exit {code}) while waiting for readiness"
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            return None
+        except Exception:
+            await asyncio.sleep(1)
+    return f"not ready after {timeout}s (checked {url})"
+
+
+async def _poll_url(url: str, timeout: int) -> str | None:
+    """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None
