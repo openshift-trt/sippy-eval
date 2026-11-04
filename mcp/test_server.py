@@ -1,9 +1,12 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 import pytest
+import server
 
 from server import (
     REPO_ROOT,
@@ -11,10 +14,12 @@ from server import (
     _default_database_dsn,
     _default_redis_url,
     _dsn_for_mode,
+    _listen_url,
     _repo_path,
     _resolve_bigquery_creds,
     _validate_dsn,
     _validate_redis_url,
+    _wait_for_ready,
     _trim,
 )
 
@@ -297,3 +302,91 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestServeReadiness:
+    @pytest.mark.parametrize(
+        ("listen", "expected"),
+        [
+            (":8080", "http://127.0.0.1:8080"),
+            ("0.0.0.0:8080", "http://127.0.0.1:8080"),
+            ("[::]:8080", "http://127.0.0.1:8080"),
+            ("localhost:8080", "http://localhost:8080"),
+            ("http://localhost:8080/", "http://localhost:8080"),
+        ],
+    )
+    def test_listen_url(self, listen, expected):
+        assert _listen_url(listen) == expected
+
+    def test_wait_for_ready_accepts_successful_response_and_closes_it(self):
+        response = mock.MagicMock(status=200)
+        process = mock.MagicMock()
+        process.poll.return_value = None
+
+        with mock.patch(
+            "server.asyncio.to_thread", new_callable=mock.AsyncMock, return_value=response
+        ):
+            result = asyncio.run(_wait_for_ready("http://localhost/api/releases", 1, process))
+
+        assert result is None
+        response.close.assert_called_once()
+
+    def test_wait_for_ready_reports_non_successful_api_response(self):
+        response = mock.MagicMock()
+        error = HTTPError("http://localhost/api/releases", 503, "unavailable", None, response)
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        loop = mock.MagicMock()
+        loop.time.side_effect = [0, 0, 2]
+
+        with (
+            mock.patch("server.asyncio.get_running_loop", return_value=loop),
+            mock.patch("server.asyncio.sleep", new_callable=mock.AsyncMock),
+            mock.patch("server.asyncio.to_thread", new_callable=mock.AsyncMock, side_effect=error),
+        ):
+            result = asyncio.run(_wait_for_ready("http://localhost/api/releases", 1, process))
+
+        assert result == "API not responding after 1s (checked http://localhost/api/releases)"
+        response.close.assert_called_once()
+
+    def test_existing_serve_process_is_checked_before_reporting_ready(self):
+        readiness = mock.AsyncMock(return_value=None)
+
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", readiness),
+        ):
+            result = asyncio.run(server.sippy_serve())
+
+        readiness.assert_awaited_once_with(
+            "http://127.0.0.1:8080/api/releases", 120, pids=[123]
+        )
+        assert "already running and ready" in result
+
+    def test_new_serve_process_waits_for_api_endpoint(self):
+        spawn = mock.AsyncMock(return_value=456)
+
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[]),
+            mock.patch("server._spawn_background", spawn),
+        ):
+            result = asyncio.run(server.sippy_serve())
+
+        assert spawn.await_args.kwargs["ready_url"] == "http://127.0.0.1:8080/api/releases"
+        assert "started and ready (pid 456)" in result
+
+    def test_existing_serve_process_timeout_reports_api_not_responding(self):
+        readiness = mock.AsyncMock(
+            return_value="API not responding after 120s (checked http://127.0.0.1:8080/api/releases)"
+        )
+
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", readiness),
+        ):
+            result = asyncio.run(server.sippy_serve())
+
+        assert "process is running (pid(s) 123) but backend API not responding" in result
