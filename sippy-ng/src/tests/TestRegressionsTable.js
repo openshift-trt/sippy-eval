@@ -19,6 +19,48 @@ import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
 
+export function filterRegressionsByVariants(regressions, variantFilters) {
+  const activeRegressions = regressions.filter(
+    (regression) => !regression.closed || !regression.closed.Valid
+  )
+
+  if (variantFilters.length === 0) return activeRegressions
+
+  return activeRegressions.filter((regression) => {
+    const variants = regression.variants || []
+
+    return variantFilters.every((filter) => {
+      const operator = filter.operatorValue
+      const hasFilterValue =
+        filter.value !== undefined &&
+        filter.value !== null &&
+        filter.value !== ''
+      if (!hasFilterValue && operator !== 'is empty') return true
+
+      const filterValue = String(filter.value || '').toLowerCase()
+      let hasMatch
+
+      if (operator === 'is empty') {
+        hasMatch = variants.length === 0
+      } else {
+        hasMatch = variants.some((variant) => {
+          const rawValue = String(variant)
+          const parsedValue = parseVariantName(rawValue).name
+          const candidates = [rawValue, parsedValue].map((value) =>
+            value.toLowerCase()
+          )
+
+          return operator === 'has entry containing'
+            ? candidates.some((value) => value.includes(filterValue))
+            : candidates.some((value) => value === filterValue)
+        })
+      }
+
+      return filter.not ? !hasMatch : hasMatch
+    })
+  })
+}
+
 export default function TestRegressionsTable({
   release,
   testName,
@@ -59,29 +101,16 @@ export default function TestRegressionsTable({
 
   const variantFilters = useMemo(() => {
     if (!filterModel || !filterModel.items) return []
-    return filterModel.items.filter((f) => f.columnField === 'variants')
+    return filterModel.items.filter(
+      (f) =>
+        f.columnField === 'variants' &&
+        ((f.value !== undefined && f.value !== null && f.value !== '') ||
+          f.operatorValue === 'is empty')
+    )
   }, [filterModel])
 
   const filteredRegressions = useMemo(() => {
-    let filtered = regressions.filter((r) => !r.closed || !r.closed.Valid)
-
-    if (variantFilters.length === 0) return filtered
-
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
+    return filterRegressionsByVariants(regressions, variantFilters)
   }, [regressions, variantFilters])
 
   if (!isLoaded) {
