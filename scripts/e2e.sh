@@ -222,7 +222,7 @@ wait_for_sippy || exit 1
 # Prime the component readiness cache so triage tests can find cached reports
 echo "Priming component readiness cache..."
 VIEWS=$(curl -sf "http://localhost:$SIPPY_API_PORT/api/component_readiness/views") || { echo "Failed to fetch views"; exit 1; }
-for VIEW in $(echo "$VIEWS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4); do
+for VIEW in $(printf '%s' "$VIEWS" | python3 -c 'import json, sys; print("\n".join(view["name"] for view in json.load(sys.stdin) if view.get("prime_cache", {}).get("enabled", False)))'); do
     echo "  Priming cache for view: $VIEW"
     curl -sf "http://localhost:$SIPPY_API_PORT/api/component_readiness?view=$VIEW" > /dev/null || { echo "Failed to prime cache for view: $VIEW"; exit 1; }
 done
