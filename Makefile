@@ -12,6 +12,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD)
 BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_TREE_STATE := $(if $(shell git status --porcelain),dirty,clean)
 LDFLAGS := -ldflags "-X github.com/openshift/sippy/pkg/version.commitFromGit=$(GIT_COMMIT) -X github.com/openshift/sippy/pkg/version.buildDate=$(BUILD_DATE) -X github.com/openshift/sippy/pkg/version.gitTreeState=$(GIT_TREE_STATE)"
+MCP_PYTHON ?= $(if $(wildcard mcp/.venv/bin/python),$(CURDIR)/mcp/.venv/bin/python,python3)
 
 all: test build
 
@@ -42,6 +43,11 @@ else
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
+	$(MAKE) mcp-test
+
+.PHONY: mcp-test
+mcp-test:
+	cd mcp && $(MCP_PYTHON) -m pytest test_server.py
 
 lint: builddir npm
 	./hack/go-lint.sh run ./...
