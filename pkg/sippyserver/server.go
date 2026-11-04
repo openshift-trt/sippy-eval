@@ -2235,19 +2235,11 @@ func (s *Server) rateLimit(endpointPath string, maxRequests int, period time.Dur
 	}
 }
 
-func (s *Server) Serve() {
-	s.determineCapabilities()
-
-	router := mux.NewRouter()
-	router.StrictSlash(true)
-
-	// Handle serving React version of frontend with support for browser router, i.e. anything not found
-	// goes to index.html
+func registerSippyNGRoutes(router *mux.Router, sippyNG fs.FS) {
 	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fs := s.sippyNG
 		if r.URL.Path != "/sippy-ng/" {
 			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
-			if _, err := fs.Open(fullPath); err != nil {
+			if _, err := sippyNG.Open(fullPath); err != nil {
 				if !os.IsNotExist(err) {
 					w.WriteHeader(http.StatusNotFound)
 					w.Header().Set("Content-Type", "text/plain")
@@ -2259,8 +2251,26 @@ func (s *Server) Serve() {
 				r.URL.Path = "/sippy-ng/"
 			}
 		}
-		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fs))).ServeHTTP(w, r)
+		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(sippyNG))).ServeHTTP(w, r)
 	})
+
+	router.HandleFunc("/sippy-ng", func(w http.ResponseWriter, r *http.Request) {
+		redirectURL := *r.URL
+		redirectURL.Path = "/sippy-ng/"
+		redirectURL.RawPath = ""
+		http.Redirect(w, r, redirectURL.String(), http.StatusMovedPermanently)
+	})
+}
+
+func (s *Server) Serve() {
+	s.determineCapabilities()
+
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+
+	// Handle serving React version of frontend with support for browser router, i.e. anything not found
+	// goes to index.html.
+	registerSippyNGRoutes(router, s.sippyNG)
 
 	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(s.static)))
 

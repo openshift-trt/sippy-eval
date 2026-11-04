@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +110,52 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGRoutes(t *testing.T) {
+	frontend := fstest.MapFS{
+		"index.html":        &fstest.MapFile{Data: []byte("spa entry point")},
+		"static/js/main.js": &fstest.MapFile{Data: []byte("frontend asset")},
+	}
+	router := mux.NewRouter()
+	router.StrictSlash(true)
+	registerSippyNGRoutes(router, frontend)
+
+	t.Run("redirects root without slash and preserves query", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/sippy-ng?release=4.18", nil)
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+
+		if res.Code != http.StatusMovedPermanently {
+			t.Fatalf("expected status %d, got %d", http.StatusMovedPermanently, res.Code)
+		}
+		if got, want := res.Header().Get("Location"), "/sippy-ng/?release=4.18"; got != want {
+			t.Fatalf("expected redirect location %q, got %q", want, got)
+		}
+	})
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "slash root serves SPA entry point", path: "/sippy-ng/", body: "spa entry point"},
+		{name: "asset route serves asset", path: "/sippy-ng/static/js/main.js", body: "frontend asset"},
+		{name: "client-side route falls back to SPA", path: "/sippy-ng/component-readiness", body: "spa entry point"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+			if res.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d", http.StatusOK, res.Code)
+			}
+			if got := strings.TrimSpace(res.Body.String()); got != tc.body {
+				t.Fatalf("expected body %q, got %q", tc.body, got)
+			}
+		})
 	}
 }
 
