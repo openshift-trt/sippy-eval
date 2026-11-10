@@ -15,6 +15,7 @@ import {
   relativeTime,
   safeEncodeURIComponent,
 } from '../helpers'
+import { matchesVariantFilters } from './regressionFilters'
 import Alert from '@mui/material/Alert'
 import PropTypes from 'prop-types'
 import React, { useEffect, useMemo } from 'react'
@@ -67,21 +68,9 @@ export default function TestRegressionsTable({
 
     if (variantFilters.length === 0) return filtered
 
-    return filtered.filter((regression) => {
-      const variantValues = (regression.variants || []).map(
-        (v) => parseVariantName(v).name
-      )
-
-      return variantFilters.every((filter) => {
-        const hasMatch = variantValues.some(
-          (v) => v.toLowerCase() === filter.value.toLowerCase()
-        )
-        if (filter.not) {
-          return !hasMatch
-        }
-        return hasMatch
-      })
-    })
+    return filtered.filter((regression) =>
+      matchesVariantFilters(regression, variantFilters)
+    )
   }, [regressions, variantFilters])
 
   if (!isLoaded) {
