@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +110,66 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGRoutes(t *testing.T) {
+	frontend := fstest.MapFS{
+		"index.html":        &fstest.MapFile{Data: []byte("<div id=\"root\">Sippy</div>")},
+		"static/js/main.js": &fstest.MapFile{Data: []byte("window.sippy = true;")},
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	registerSippyNGRoutes(router, frontend)
+
+	tests := []struct {
+		name         string
+		path         string
+		wantStatus   int
+		wantLocation string
+		wantBody     string
+	}{
+		{
+			name:         "redirects root path to slash form",
+			path:         "/sippy-ng",
+			wantStatus:   http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/",
+		},
+		{
+			name:       "serves app entry point",
+			path:       "/sippy-ng/",
+			wantStatus: http.StatusOK,
+			wantBody:   "Sippy",
+		},
+		{
+			name:       "serves deep browser route with app entry point",
+			path:       "/sippy-ng/component_readiness/main",
+			wantStatus: http.StatusOK,
+			wantBody:   "Sippy",
+		},
+		{
+			name:       "serves static asset",
+			path:       "/sippy-ng/static/js/main.js",
+			wantStatus: http.StatusOK,
+			wantBody:   "window.sippy = true;",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			router.ServeHTTP(response, request)
+
+			if response.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d", tc.wantStatus, response.Code)
+			}
+			if got := response.Header().Get("Location"); got != tc.wantLocation {
+				t.Fatalf("expected redirect location %q, got %q", tc.wantLocation, got)
+			}
+			if !strings.Contains(response.Body.String(), tc.wantBody) {
+				t.Fatalf("expected body to contain %q, got %q", tc.wantBody, response.Body.String())
+			}
+		})
 	}
 }
 
