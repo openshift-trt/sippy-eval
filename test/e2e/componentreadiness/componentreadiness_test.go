@@ -21,6 +21,7 @@ import (
 	"github.com/openshift/sippy/test/e2e/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 func TestComponentReadinessViews(t *testing.T) {
@@ -29,6 +30,54 @@ func TestComponentReadinessViews(t *testing.T) {
 	require.NoError(t, err, "error making http request")
 	t.Logf("found %d views", len(views))
 	require.Greater(t, len(views), 0, "no views returned, check server cli params")
+}
+
+func TestSeededRegressionRemainsActiveAcrossViews(t *testing.T) {
+	dbc := util.CreateE2EPostgresConnection(t)
+
+	var regressions []models.TestRegression
+	err := dbc.DB.Preload("Views").
+		Where("release = ? AND test_id = ? AND closed IS NULL", util.Release, "test-significant-regression").
+		Find(&regressions).Error
+	require.NoError(t, err)
+
+	var foundSharedRegression bool
+	for _, regression := range regressions {
+		activeViews := sets.New[string]()
+		for _, view := range regression.Views {
+			if view.Active {
+				activeViews.Insert(view.ViewName)
+			}
+		}
+		if activeViews.Has(util.Release+"-main") && activeViews.Has(util.Release+"-secondary") {
+			foundSharedRegression = true
+			break
+		}
+	}
+	assert.True(t, foundSharedRegression, "expected a seeded regression to remain active in both enabled views")
+}
+
+func TestSeededTriageHasRelatedPotentialMatch(t *testing.T) {
+	dbc := util.CreateE2EPostgresConnection(t)
+
+	var triage models.Triage
+	err := dbc.DB.Preload("Regressions").
+		Where("url = ?", "https://issues.redhat.com/browse/OCPBUGS-900001").First(&triage).Error
+	require.NoError(t, err)
+	require.Len(t, triage.Regressions, 2, "seed triage should span two regressions")
+
+	var matches []componentreadiness.PotentialMatchingRegression
+	err = util.SippyGet(fmt.Sprintf("/api/component_readiness/triages/%d/matches?view=%s-main", triage.ID, util.Release), &matches)
+	require.NoError(t, err)
+
+	for _, match := range matches {
+		if match.RegressedTest.TestID == "test-significant-regression-related" {
+			require.NotNil(t, match.PotentialMatch)
+			assert.NotEmpty(t, match.OverlappingJobRuns, "related regression should share a failed job run with the triage")
+			return
+		}
+	}
+	t.Fatal("seeded related regression was not returned as a potential triage match")
 }
 
 func TestRegressionCacheLoader(t *testing.T) {

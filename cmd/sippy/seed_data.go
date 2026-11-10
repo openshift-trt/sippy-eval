@@ -259,6 +259,13 @@ var syntheticTests = []syntheticTestSpec{
 			gcpAmd64Parallel: {"4.21": {200, 190, 0}, "4.22": {200, 188, 0}},
 		},
 	},
+	{
+		testID: "test-significant-regression-related", testName: "[sig-network] Services should serve endpoints on same port and different protocols",
+		component: "comp-SignificantRegression", capabilities: []string{"cap1"},
+		jobCounts: map[string]map[string]testCount{
+			awsAmd64Parallel: {"4.21": {200, 190, 0}, "4.22": {200, 170, 0}},
+		},
+	},
 
 	// --- ExtremeRegression: extreme on aws/amd64, significant on others ---
 	// Also runs on azure (not in default view) to test variant filtering.
@@ -536,6 +543,9 @@ func seedSyntheticData(dbc *db.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := seedReleasePayloadData(dbc); err != nil {
+		return errors.WithMessage(err, "failed to seed release payload data")
+	}
 
 	if err := seedPresubmitData(dbc); err != nil {
 		return errors.WithMessage(err, "failed to seed presubmit data")
@@ -572,6 +582,9 @@ func seedSyntheticData(dbc *db.DB) error {
 	log.Info("Syncing regressions...")
 	if err := syncRegressions(dbc); err != nil {
 		return errors.WithMessage(err, "failed to sync regressions")
+	}
+	if err := seedComponentReadinessExamples(dbc); err != nil {
+		return errors.WithMessage(err, "failed to seed Component Readiness examples")
 	}
 
 	log.Infof("Seeded synthetic data: %d ProwJobRuns, %d test results across %d releases",
@@ -779,6 +792,7 @@ func seedRunsForJob(dbc *db.DB, suite *models.Suite, prowJob models.ProwJob, jrK
 			ProwJobID:      prowJob.ID,
 			ProwJobRelease: prowJob.Release,
 			Cluster:        "build01",
+			URL:            syntheticProwJobRunURL(prowJob.Name, timestamp),
 			Timestamp:      timestamp,
 			Duration:       3 * time.Hour,
 		}
@@ -833,6 +847,19 @@ func seedRunsForJob(dbc *db.DB, suite *models.Suite, prowJob models.ProwJob, jrK
 				return 0, 0, fmt.Errorf("failed to create ProwJobRunTest: %w", err)
 			}
 			totalResults++
+
+			if jrKey.release == "4.22" && jrKey.jobTemplate == awsAmd64Parallel &&
+				ts.testID == "test-significant-regression" && i == counts.total-1 && status == int(v1.TestStatusFailure) {
+				output := models.ProwJobRunTestOutput{
+					ProwJobRunTestID:        result.ID,
+					Output:                  "dial tcp 10.0.0.1:443: context deadline exceeded while contacting the test service",
+					ProwJobRunTestTimestamp: result.ProwJobRunTimestamp,
+					ProwJobRunTestRelease:   result.ProwJobRunRelease,
+				}
+				if err := dbc.DB.Create(&output).Error; err != nil {
+					return 0, 0, fmt.Errorf("failed to create periodic ProwJobRunTestOutput: %w", err)
+				}
+			}
 		}
 	}
 
@@ -892,6 +919,154 @@ func seedRunsForJob(dbc *db.DB, suite *models.Suite, prowJob models.ProwJob, jrK
 	return totalRuns, totalResults, nil
 }
 
+func syntheticProwJobRunURL(jobName string, timestamp time.Time) string {
+	return fmt.Sprintf("https://prow.ci.openshift.org/view/gs/test-platform-results/logs/%s/%d", jobName, timestamp.Unix())
+}
+
+func seedReleasePayloadData(dbc *db.DB) error {
+	type streamJob struct {
+		name        string
+		jobTemplate string
+	}
+
+	streams := []streamJob{
+		{name: "ci", jobTemplate: awsAmd64Parallel},
+		{name: "nightly", jobTemplate: gcpAmd64Parallel},
+	}
+	nextPRNumber := 99001
+
+	for _, release := range []string{"4.21", "4.22"} {
+		for _, stream := range streams {
+			jobName := fmt.Sprintf(stream.jobTemplate, release)
+			var prowJob models.ProwJob
+			if err := dbc.DB.Where("name = ?", jobName).First(&prowJob).Error; err != nil {
+				return fmt.Errorf("finding ProwJob %s for payload seed: %w", jobName, err)
+			}
+
+			var test models.Test
+			if err := dbc.DB.Where("name = ?", "[sig-network] Services should serve endpoints on same port and different protocol").First(&test).Error; err != nil {
+				return fmt.Errorf("finding payload failure test for %s: %w", jobName, err)
+			}
+
+			findRun := func(status int) (models.ProwJobRun, error) {
+				var run models.ProwJobRun
+				query := dbc.DB.Model(&models.ProwJobRun{}).
+					Joins(`JOIN prow_job_run_tests ON prow_job_run_tests.prow_job_run_id = prow_job_runs.id
+						AND prow_job_run_tests.prow_job_run_timestamp = prow_job_runs.timestamp
+						AND prow_job_run_tests.prow_job_run_release = prow_job_runs.prow_job_release`).
+					Where("prow_job_runs.prow_job_id = ? AND prow_job_runs.prow_job_release = ?", prowJob.ID, release).
+					Where("prow_job_run_tests.prow_job_run_release = ? AND prow_job_run_tests.test_id = ?", release, test.ID).
+					Where("prow_job_run_tests.status = ?", status)
+				if status == int(v1.TestStatusSuccess) {
+					query = query.Where("prow_job_runs.succeeded = true")
+				} else {
+					query = query.Where("prow_job_runs.failed = true")
+				}
+				err := query.Order("prow_job_runs.timestamp DESC").First(&run).Error
+				return run, err
+			}
+
+			acceptedRun, err := findRun(int(v1.TestStatusSuccess))
+			if err != nil {
+				return fmt.Errorf("finding accepted payload job run for %s: %w", jobName, err)
+			}
+			rejectedRun, err := findRun(int(v1.TestStatusFailure))
+			if err != nil {
+				return fmt.Errorf("finding rejected payload job run for %s: %w", jobName, err)
+			}
+
+			acceptedTime := acceptedRun.Timestamp.Add(-time.Minute)
+			rejectedTime := rejectedRun.Timestamp.Add(-time.Minute)
+			if !rejectedTime.After(acceptedTime) {
+				return fmt.Errorf("rejected payload run for %s is not later than accepted run", jobName)
+			}
+
+			acceptedTag := payloadTagFor(release, stream.name, acceptedTime)
+			if err := createSeedReleasePayload(dbc, release, stream.name, acceptedTag, apitype.PayloadAccepted, "", acceptedRun, prowJob, nextPRNumber); err != nil {
+				return err
+			}
+			nextPRNumber++
+
+			rejectedTag := payloadTagFor(release, stream.name, rejectedTime)
+			if err := createSeedReleasePayload(dbc, release, stream.name, rejectedTag, apitype.PayloadRejected, acceptedTag, rejectedRun, prowJob, nextPRNumber); err != nil {
+				return err
+			}
+			nextPRNumber++
+		}
+	}
+
+	return nil
+}
+
+func payloadTagFor(release, stream string, releaseTime time.Time) string {
+	return fmt.Sprintf("%s.0-0.%s-%s", release, stream, releaseTime.UTC().Format("2006-01-02-150405"))
+}
+
+func createSeedReleasePayload(
+	dbc *db.DB,
+	release, stream, tagName, phase, previousTag string,
+	jobRun models.ProwJobRun,
+	prowJob models.ProwJob,
+	prNumber int,
+) error {
+	tag := models.ReleaseTag{
+		ReleaseTag:         tagName,
+		Release:            release,
+		Stream:             stream,
+		Architecture:       "amd64",
+		Phase:              phase,
+		ReleaseTime:        jobRun.Timestamp.Add(-time.Minute),
+		PreviousReleaseTag: previousTag,
+		KubernetesVersion:  release + ".0",
+	}
+	if err := dbc.DB.Create(&tag).Error; err != nil {
+		return fmt.Errorf("creating release payload %s: %w", tagName, err)
+	}
+
+	state := "Succeeded"
+	if phase == apitype.PayloadRejected {
+		state = "Failed"
+	}
+	jobRunRecord := models.ReleaseJobRun{
+		ReleaseTagID:   fmt.Sprintf("%d", tag.ID),
+		Name:           jobRun.ID,
+		JobName:        prowJob.Name,
+		Kind:           "Blocking",
+		State:          state,
+		TransitionTime: jobRun.Timestamp.Add(jobRun.Duration),
+		URL:            jobRun.URL,
+	}
+	if err := dbc.DB.Create(&jobRunRecord).Error; err != nil {
+		return fmt.Errorf("creating job run for release payload %s: %w", tagName, err)
+	}
+
+	prURL := fmt.Sprintf("https://github.com/openshift/origin/pull/%d", prNumber)
+	pullRequest := models.ReleasePullRequest{
+		URL:           prURL,
+		PullRequestID: fmt.Sprintf("%d", prNumber),
+		Name:          "openshift/origin",
+		Description:   fmt.Sprintf("Synthetic release payload change for %s", tagName),
+		BugURL:        "https://issues.redhat.com/browse/OCPBUGS-900001",
+	}
+	if err := dbc.DB.Create(&pullRequest).Error; err != nil {
+		return fmt.Errorf("creating pull request for release payload %s: %w", tagName, err)
+	}
+	if err := dbc.DB.Model(&tag).Association("PullRequests").Append(&pullRequest); err != nil {
+		return fmt.Errorf("linking pull request to release payload %s: %w", tagName, err)
+	}
+
+	repository := models.ReleaseRepository{
+		ReleaseTagID: fmt.Sprintf("%d", tag.ID),
+		Name:         "openshift/origin",
+		Head:         fmt.Sprintf("%040x", prNumber),
+		DiffURL:      fmt.Sprintf("https://github.com/openshift/origin/compare/%s", tagName),
+	}
+	if err := dbc.DB.Create(&repository).Error; err != nil {
+		return fmt.Errorf("creating repository for release payload %s: %w", tagName, err)
+	}
+	return nil
+}
+
 func syncRegressions(dbc *db.DB) error {
 	provider := pgprovider.NewPostgresProvider(dbc, nil)
 	ctx := context.Background()
@@ -912,8 +1087,23 @@ func syncRegressions(dbc *db.DB) error {
 
 	backend := componentreadiness.NewPostgresRegressionStore(dbc, nil)
 	rLog := log.WithField("source", "seed-regression-sync")
+	type releaseSyncResult struct {
+		activeIDs     sets.Set[uint]
+		activeViewMap map[uint][]string
+	}
+	releaseResults := make(map[string]*releaseSyncResult)
 
 	for _, view := range views.ComponentReadiness {
+		if !view.RegressionTracking.Enabled {
+			continue
+		}
+		if _, ok := releaseResults[view.SampleRelease.Name]; !ok {
+			releaseResults[view.SampleRelease.Name] = &releaseSyncResult{
+				activeIDs:     sets.New[uint](),
+				activeViewMap: make(map[uint][]string),
+			}
+		}
+
 		baseRelease, err := utils.GetViewReleaseOptions(releases, "basis", view.BaseRelease, 0, 0)
 		if err != nil {
 			return fmt.Errorf("error getting base release for view %s: %w", view.Name, err)
@@ -946,28 +1136,33 @@ func syncRegressions(dbc *db.DB) error {
 			if err := backend.UpsertRegressionView(reg.ID, view.Name); err != nil {
 				return fmt.Errorf("error upserting view %s for regression %d: %w", view.Name, reg.ID, err)
 			}
+			result := releaseResults[view.SampleRelease.Name]
+			result.activeIDs.Insert(reg.ID)
+			result.activeViewMap[reg.ID] = append(result.activeViewMap[reg.ID], view.Name)
 		}
 
-		// Close regressions no longer in the report
-		allRegs, err := backend.ListCurrentRegressionsForRelease(view.SampleRelease.Name)
+		rLog.Infof("synced regressions for view %s: %d active", view.Name, len(activeRegs))
+	}
+
+	for release, result := range releaseResults {
+		allRegs, err := backend.ListCurrentRegressionsForRelease(release)
 		if err != nil {
 			return fmt.Errorf("error listing regressions: %w", err)
 		}
-		activeIDs := map[uint]bool{}
-		for _, r := range activeRegs {
-			activeIDs[r.ID] = true
-		}
-		now := time.Now()
+		regressionIDs := make([]uint, 0, len(allRegs))
+		now := time.Now().UTC()
 		for _, reg := range allRegs {
-			if !activeIDs[reg.ID] && !reg.Closed.Valid {
+			regressionIDs = append(regressionIDs, reg.ID)
+			if !result.activeIDs.Has(reg.ID) && !reg.Closed.Valid {
 				reg.Closed = sql.NullTime{Valid: true, Time: now}
 				if err := backend.UpdateRegression(reg); err != nil {
 					return fmt.Errorf("error closing regression %d: %w", reg.ID, err)
 				}
 			}
 		}
-
-		rLog.Infof("synced regressions for view %s: %d active", view.Name, len(activeRegs))
+		if err := backend.DeactivateRolledOffViews(regressionIDs, result.activeViewMap); err != nil {
+			return fmt.Errorf("error deactivating rolled-off regression views for release %s: %w", release, err)
+		}
 	}
 
 	if err := backend.ResolveTriages(); err != nil {
@@ -975,6 +1170,134 @@ func syncRegressions(dbc *db.DB) error {
 	}
 
 	return nil
+}
+
+func seedComponentReadinessExamples(dbc *db.DB) error {
+	regressionTestIDs := []string{
+		"test-significant-regression",
+		"test-extreme-regression",
+		"test-significant-regression-related",
+	}
+	regressions := make(map[string]models.TestRegression, len(regressionTestIDs))
+	for _, testID := range regressionTestIDs {
+		var regression models.TestRegression
+		if err := dbc.DB.Where("release = ? AND test_id = ? AND closed IS NULL", "4.22", testID).
+			Order("id").First(&regression).Error; err != nil {
+			return fmt.Errorf("finding active regression for test %s: %w", testID, err)
+		}
+		regressions[testID] = regression
+	}
+	var regressionJob models.ProwJob
+	if err := dbc.DB.Where("name = ?", fmt.Sprintf(awsAmd64Parallel, "4.22")).First(&regressionJob).Error; err != nil {
+		return fmt.Errorf("finding AWS regression job: %w", err)
+	}
+
+	var triagedTests []models.Test
+	if err := dbc.DB.Where("name IN ?", []string{
+		"[sig-network] Services should serve endpoints on same port and different protocol",
+		"[sig-etcd] etcd leader changes are not excessive",
+	}).Find(&triagedTests).Error; err != nil {
+		return fmt.Errorf("finding tests for seed bug: %w", err)
+	}
+	if len(triagedTests) != 2 {
+		return fmt.Errorf("expected 2 tests for seed bug, found %d", len(triagedTests))
+	}
+
+	bug := models.Bug{
+		Key:             "OCPBUGS-900001",
+		Status:          "New",
+		LastChangeTime:  time.Now().UTC(),
+		Summary:         "Synthetic network and etcd regressions for local Component Readiness",
+		AffectsVersions: pq.StringArray{"4.22"},
+		TargetVersions:  pq.StringArray{"4.22"},
+		Components:      pq.StringArray{"comp-SignificantRegression", "comp-ExtremeRegression"},
+		Labels:          pq.StringArray{"sippy-seed"},
+		URL:             "https://issues.redhat.com/browse/OCPBUGS-900001",
+	}
+	var existingBug models.Bug
+	if err := dbc.DB.Where("key = ?", bug.Key).FirstOrCreate(&existingBug, bug).Error; err != nil {
+		return fmt.Errorf("creating seed bug: %w", err)
+	}
+	if err := dbc.DB.Model(&existingBug).Association("Tests").Append(&triagedTests); err != nil {
+		return fmt.Errorf("linking seed bug to tests: %w", err)
+	}
+
+	triagedRegressions := []models.TestRegression{
+		regressions["test-significant-regression"],
+		regressions["test-extreme-regression"],
+	}
+	triage := models.Triage{
+		URL:         existingBug.URL,
+		Description: "Shared CI timeouts affect networking and etcd test coverage.",
+		Type:        models.TriageTypeProduct,
+		BugID:       &existingBug.ID,
+		Regressions: triagedRegressions,
+	}
+	triageDB := dbc.DB.WithContext(context.WithValue(context.Background(), models.CurrentUserKey, "seed-data"))
+	if err := triageDB.Create(&triage).Error; err != nil {
+		return fmt.Errorf("creating seed triage: %w", err)
+	}
+
+	tracker := componentreadiness.NewPostgresRegressionStore(dbc, nil)
+	allRegressions := make([]*models.TestRegression, 0, len(regressionTestIDs))
+	for _, testID := range regressionTestIDs {
+		regression := regressions[testID]
+		var test models.Test
+		if err := dbc.DB.Where("name = ?", testNameForSyntheticTest(testID)).First(&test).Error; err != nil {
+			return fmt.Errorf("finding test record for regression %s: %w", testID, err)
+		}
+
+		var run models.ProwJobRun
+		if err := dbc.DB.Model(&models.ProwJobRun{}).
+			Preload("ProwJob").
+			Joins(`JOIN prow_job_run_tests ON prow_job_run_tests.prow_job_run_id = prow_job_runs.id
+				AND prow_job_run_tests.prow_job_run_timestamp = prow_job_runs.timestamp
+				AND prow_job_run_tests.prow_job_run_release = prow_job_runs.prow_job_release`).
+			Where("prow_job_runs.prow_job_release = ? AND prow_job_runs.prow_job_id = ?", "4.22", regressionJob.ID).
+			Where("prow_job_run_tests.prow_job_run_release = ? AND prow_job_run_tests.test_id = ?", "4.22", test.ID).
+			Where("prow_job_run_tests.status = ?", int(v1.TestStatusFailure)).
+			Order("prow_job_runs.timestamp DESC").First(&run).Error; err != nil {
+			return fmt.Errorf("finding failed job run for regression %s: %w", testID, err)
+		}
+
+		labels := sets.New[string](run.Labels...)
+		labels.Insert("APIServerTimeout")
+		labelValues := pq.StringArray(labels.UnsortedList())
+		if err := dbc.DB.Model(&models.ProwJobRun{}).Where("id = ?", run.ID).Update("labels", labelValues).Error; err != nil {
+			return fmt.Errorf("adding label to job run %d: %w", run.ID, err)
+		}
+
+		regressionJobRun := models.RegressionJobRun{
+			RegressionID: regression.ID,
+			ProwJobRunID: fmt.Sprintf("%d", run.ID),
+			ProwJobName:  run.ProwJob.Name,
+			ProwJobURL:   run.URL,
+			StartTime:    run.Timestamp,
+			TestFailed:   true,
+			TestFailures: run.TestFailures,
+			JobLabels:    pq.StringArray{"APIServerTimeout"},
+			JobSymptoms:  pq.StringArray{"APITimeoutSymptom"},
+		}
+		if err := dbc.DB.Where("regression_id = ? AND prow_job_run_id = ?", regression.ID, regressionJobRun.ProwJobRunID).
+			FirstOrCreate(&regressionJobRun, regressionJobRun).Error; err != nil {
+			return fmt.Errorf("creating regression job run for regression %d: %w", regression.ID, err)
+		}
+		allRegressions = append(allRegressions, &regression)
+	}
+
+	if err := tracker.SyncTriageSymptoms(allRegressions); err != nil {
+		return fmt.Errorf("syncing seed triage symptoms: %w", err)
+	}
+	return nil
+}
+
+func testNameForSyntheticTest(testID string) string {
+	for _, test := range syntheticTests {
+		if test.testID == testID {
+			return test.testName
+		}
+	}
+	return ""
 }
 
 func seedPresubmitData(dbc *db.DB) error {
