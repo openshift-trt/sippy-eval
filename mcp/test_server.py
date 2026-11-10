@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -16,6 +17,8 @@ from server import (
     _validate_dsn,
     _validate_redis_url,
     _trim,
+    _wait_for_ready,
+    sippy_serve,
 )
 
 
@@ -297,3 +300,54 @@ class TestDefaults:
             os.environ, {"REDIS_URL": "redis://other:6380"}, clear=False
         ):
             assert _default_redis_url() == "redis://other:6380"
+
+
+class TestSippyServeReadiness:
+    def test_already_running_waits_for_api(self):
+        wait_for_ready = mock.AsyncMock(return_value=None)
+        with (
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", wait_for_ready),
+        ):
+            result = asyncio.run(sippy_serve(listen=":8090"))
+
+        wait_for_ready.assert_awaited_once_with("http://127.0.0.1:8090/api/releases", 120)
+        assert "sippy_serve already running" in result
+
+    def test_already_running_reports_api_timeout(self):
+        wait_for_ready = mock.AsyncMock(
+            return_value="not ready after 120s (checked http://127.0.0.1:8090/api/releases)"
+        )
+        with (
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", wait_for_ready),
+            mock.patch("server._tail_file", return_value="server log tail"),
+        ):
+            result = asyncio.run(sippy_serve(listen=":8090"))
+
+        assert "process detected (pid(s) 123) but API not responding" in result
+        assert "http://127.0.0.1:8090/api/releases" in result
+        assert "server log tail" in result
+
+    def test_new_process_uses_api_readiness_endpoint(self):
+        spawn = mock.AsyncMock(return_value=456)
+        with (
+            mock.patch("server._pids_sippy_serve", return_value=[]),
+            mock.patch("server._spawn_background", spawn),
+        ):
+            result = asyncio.run(sippy_serve(listen=":8090"))
+
+        assert spawn.await_args.kwargs["ready_url"] == (
+            "http://127.0.0.1:8090/api/releases"
+        )
+        assert "sippy_serve started and ready (pid 456)" in result
+
+    def test_readiness_poll_works_without_process_handle(self):
+        to_thread = mock.AsyncMock(return_value=object())
+        with mock.patch("server.asyncio.to_thread", to_thread):
+            result = asyncio.run(_wait_for_ready("http://127.0.0.1:8080/api/releases", 1))
+
+        assert result is None
+        to_thread.assert_awaited_once_with(
+            mock.ANY, "http://127.0.0.1:8080/api/releases", None, 2
+        )

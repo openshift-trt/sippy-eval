@@ -380,8 +380,10 @@ async def sippy_serve(
 ) -> str:
     """Start the Sippy HTTP server (``go run ./cmd/sippy serve``) in the background.
 
-    Long-running: returns after spawn with PID, log path, and listen address. Skips starting
-    if a matching ``sippy serve`` process is already running, unless ``restart`` is True.
+    Waits for ``GET /api/releases`` to respond before reporting ready, whether the server was
+    just spawned or already running. Returns an error if the API does not respond within 120s.
+    Skips starting if a matching ``sippy serve`` process is already running, unless
+    ``restart`` is True.
 
     Defaults are derived from ``SIPPY_DATA_MODE`` (``seed`` or ``prod-like``):
 
@@ -419,7 +421,14 @@ async def sippy_serve(
     if existing:
         if not restart:
             host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+            api_ready_url = f"{host_hint.rstrip('/')}/api/releases"
             pids = ", ".join(str(p) for p in existing)
+            readiness_err = await _wait_for_ready(api_ready_url, 120)
+            if readiness_err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API not responding: "
+                    f"{readiness_err}. Log: {log_path}\n--- tail ---\n{_tail_file(log_path, 40)}"
+                )
             return (
                 f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
                 f"log: {log_path}. Call with restart=True to restart."
@@ -468,9 +477,10 @@ async def sippy_serve(
         args.extend(["--config", str(cfg)])
 
     host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+    api_ready_url = f"{host_hint.rstrip('/')}/api/releases"
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=api_ready_url,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
@@ -546,14 +556,17 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+async def _wait_for_ready(
+    url: str, timeout: int, proc: subprocess.Popen | None = None
+) -> str | None:
     """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                return f"process exited (exit {code}) while waiting for readiness"
         try:
             await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
             return None
