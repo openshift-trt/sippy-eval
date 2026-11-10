@@ -38,7 +38,7 @@ Commands use the **repo root** as working directory unless noted. Most long outp
 | -------------------- | --------------------------------------------------------------------------- | --------------------------------------- |
 | `regression_cache`   | `go run ./cmd/sippy load --loader regression-cache` (BigQuery + Redis + DB) | `sippy-dev-logs/regression_cache.log`   |
 | `restore_prodlike_db`| `scripts/restore_prodlike_db.sh` (drop/recreate `prodlike` from backup)    | `sippy-dev-logs/restore_prodlike_db.log`|
-| `sippy_serve`        | Background `go run ./cmd/sippy serve` (API/UI, typically port **8080**)     | `sippy-dev-logs/sippy_serve.log`        |
+| `sippy_serve`        | Background `go run ./cmd/sippy serve` (API/UI, typically port **8080**); waits up to 120 seconds for `GET /api/releases` before reporting ready | `sippy-dev-logs/sippy_serve.log`        |
 | `sippy_ng_start`     | Background `npm start` in `sippy-ng/` (typically port **3000**)             | `sippy-dev-logs/sippy_ng_start.log`     |
 | `sippy_stop`         | Stops background `sippy_serve` and `sippy_ng_start` processes               | —                                       |
 | `run_e2e`            | `make e2e`                                                                  | `sippy-dev-logs/run_e2e.log`            |
@@ -57,7 +57,7 @@ Optional parameters (timeouts, paths, DSNs, etc.) are documented on each functio
 
 ### Background processes
 
-`sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic).
+`sippy_serve` and `sippy_ng_start` spawn detached processes. A second start is refused if a matching process is already running (see `server.py` for detection logic). For `sippy_serve`, an existing process is also checked against `GET /api/releases` before it is reported ready.
 
 ## Cursor skills
 

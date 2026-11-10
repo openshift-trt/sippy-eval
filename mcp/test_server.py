@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -13,8 +14,10 @@ from server import (
     _dsn_for_mode,
     _repo_path,
     _resolve_bigquery_creds,
+    sippy_serve,
     _validate_dsn,
     _validate_redis_url,
+    _wait_for_ready,
     _trim,
 )
 
@@ -236,6 +239,73 @@ class TestDsnForMode:
             clear=False,
         ):
             assert _dsn_for_mode("prod-like") == "postgresql://custom/prodlike"
+
+
+class TestSippyServe:
+    def test_existing_process_waits_for_api(self):
+        wait_for_ready = mock.AsyncMock(return_value=None)
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", wait_for_ready),
+        ):
+            result = asyncio.run(sippy_serve())
+
+        wait_for_ready.assert_awaited_once_with(
+            "http://127.0.0.1:8080/api/releases", 120, None
+        )
+        assert "already running and API ready" in result
+        assert "pid(s) 123" in result
+
+    def test_existing_process_reports_api_timeout(self):
+        wait_for_ready = mock.AsyncMock(return_value="not ready after 120s")
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[123]),
+            mock.patch("server._wait_for_ready", wait_for_ready),
+        ):
+            result = asyncio.run(sippy_serve())
+
+        assert "process detected (pid(s) 123) but API is not responding" in result
+        assert "not ready after 120s" in result
+        assert "Listen: http://127.0.0.1:8080" in result
+        assert "sippy_serve.log" in result
+
+    def test_new_process_waits_for_releases_api(self):
+        spawn = mock.AsyncMock(return_value=456)
+        with (
+            mock.patch("server._data_mode", return_value="seed"),
+            mock.patch("server._pids_sippy_serve", return_value=[]),
+            mock.patch("server._spawn_background", spawn),
+        ):
+            result = asyncio.run(sippy_serve())
+
+        assert spawn.await_args.kwargs["ready_url"] == "http://127.0.0.1:8080/api/releases"
+        assert spawn.await_args.kwargs["ready_timeout"] == 120
+        assert "started and API ready (pid 456)" in result
+
+
+class TestWaitForReady:
+    def test_http_response_is_ready(self):
+        url = "http://127.0.0.1:8080/api/releases"
+        async def run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            mock.patch("server.asyncio.to_thread", new=run_inline),
+            mock.patch("server.urllib.request.urlopen") as urlopen,
+        ):
+            result = asyncio.run(_wait_for_ready(url, 1, None))
+
+        assert result is None
+        urlopen.assert_called_once_with(url, timeout=mock.ANY)
+
+    def test_timeout_reports_url(self):
+        url = "http://127.0.0.1:8080/api/releases"
+
+        result = asyncio.run(_wait_for_ready(url, 0, None))
+
+        assert result == f"not ready after 0s (checked {url})"
 
 
 class TestValidateDsn:

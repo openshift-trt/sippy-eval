@@ -21,6 +21,7 @@ mcp = FastMCP("sippy-dev")
 DEV_LOG_DIR = REPO_ROOT / "sippy-dev-logs"
 
 _MAX_TOOL_CHARS = 28000
+_SERVE_READY_TIMEOUT_SECONDS = 120
 
 
 def _ensure_dev_log_dir() -> None:
@@ -380,8 +381,9 @@ async def sippy_serve(
 ) -> str:
     """Start the Sippy HTTP server (``go run ./cmd/sippy serve``) in the background.
 
-    Long-running: returns after spawn with PID, log path, and listen address. Skips starting
-    if a matching ``sippy serve`` process is already running, unless ``restart`` is True.
+    Long-running: waits for the API to respond before returning its PID, log path, and listen
+    address. Skips starting if a matching ``sippy serve`` process is already running, unless
+    ``restart`` is True. Readiness is checked with ``GET /api/releases`` for up to 120 seconds.
 
     Defaults are derived from ``SIPPY_DATA_MODE`` (``seed`` or ``prod-like``):
 
@@ -415,14 +417,24 @@ async def sippy_serve(
     if not views.is_file():
         return f"views file not found: {views}"
 
+    host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
+    ready_url = f"{host_hint.rstrip('/')}/api/releases"
     existing = _pids_sippy_serve()
     if existing:
         if not restart:
-            host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
             pids = ", ".join(str(p) for p in existing)
+            ready_err = await _wait_for_ready(
+                ready_url, _SERVE_READY_TIMEOUT_SECONDS, None
+            )
+            if ready_err:
+                return (
+                    f"sippy_serve process detected (pid(s) {pids}) but API is not responding: "
+                    f"{ready_err}. Listen: {host_hint} log: {log_path}. "
+                    "Call with restart=True to restart."
+                )
             return (
-                f"sippy_serve already running (pid(s) {pids}). Listen: {host_hint} "
-                f"log: {log_path}. Call with restart=True to restart."
+                f"sippy_serve already running and API ready (pid(s) {pids}). "
+                f"Listen: {host_hint} log: {log_path}. Call with restart=True to restart."
             )
         await _stop_pids(existing)
 
@@ -467,14 +479,16 @@ async def sippy_serve(
             return f"config file not found: {cfg}"
         args.extend(["--config", str(cfg)])
 
-    host_hint = f"http://127.0.0.1{listen}" if listen.startswith(":") else listen
     pid_or_err = await _spawn_background(
         label="sippy_serve", args=args, cwd=REPO_ROOT, log_path=log_path,
-        ready_url=host_hint,
+        ready_url=ready_url, ready_timeout=_SERVE_READY_TIMEOUT_SECONDS,
     )
     if isinstance(pid_or_err, str):
         return pid_or_err
-    return f"sippy_serve started and ready (pid {pid_or_err}). Listen: {host_hint} log: {log_path}"
+    return (
+        f"sippy_serve started and API ready (pid {pid_or_err}). "
+        f"Listen: {host_hint} log: {log_path}"
+    )
 
 
 @mcp.tool()
@@ -546,19 +560,27 @@ async def sippy_ng_start(
     )
 
 
-async def _wait_for_ready(url: str, timeout: int, proc: subprocess.Popen) -> str | None:
+async def _wait_for_ready(
+    url: str, timeout: int, proc: subprocess.Popen | None
+) -> str | None:
     """Poll *url* until it responds or *timeout* seconds elapse. Returns an error string or None."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        code = proc.poll()
-        if code is not None:
-            return f"process exited (exit {code}) while waiting for readiness"
+        if proc is not None:
+            code = proc.poll()
+            if code is not None:
+                return f"process exited (exit {code}) while waiting for readiness"
+        request_timeout = min(2, deadline - loop.time())
         try:
-            await asyncio.to_thread(urllib.request.urlopen, url, None, 2)
+            def _request() -> None:
+                with urllib.request.urlopen(url, timeout=request_timeout):
+                    pass
+
+            await asyncio.to_thread(_request)
             return None
         except Exception:
-            await asyncio.sleep(1)
+            await asyncio.sleep(min(1, max(0, deadline - loop.time())))
     return f"not ready after {timeout}s (checked {url})"
 
 
@@ -606,6 +628,12 @@ async def _spawn_background(
         err = await _wait_for_ready(ready_url, ready_timeout, proc)
         if err:
             tail = _tail_file(log_path, 40)
+            if label == "sippy_serve":
+                return (
+                    f"{label} started (pid {proc.pid}) but API is not responding: {err}. "
+                    f"Listen: {ready_url.rsplit('/api/releases', 1)[0]} log: {log_path}\n"
+                    f"--- tail ---\n{tail}"
+                )
             return f"{label} started (pid {proc.pid}) but {err}. Log: {log_path}\n--- tail ---\n{tail}"
 
     return proc.pid
