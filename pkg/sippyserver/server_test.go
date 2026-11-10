@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 
 	apitype "github.com/openshift/sippy/pkg/apis/api"
@@ -108,6 +110,69 @@ func TestLogRequestHandlerAllowsWebSocketUpgrade(t *testing.T) {
 	defer conn.Close()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("expected 101 Switching Protocols, got %d", resp.StatusCode)
+	}
+}
+
+func TestSippyNGRoutes(t *testing.T) {
+	const indexHTML = "<html>Sippy app</html>"
+	const appJS = "window.sippyLoaded = true"
+
+	webFS := fstest.MapFS{
+		"index.html":        &fstest.MapFile{Data: []byte(indexHTML)},
+		"static/js/main.js": &fstest.MapFile{Data: []byte(appJS)},
+	}
+	router := mux.NewRouter().StrictSlash(true)
+	registerSippyNGRoutes(router, webFS)
+
+	tests := []struct {
+		name         string
+		path         string
+		wantStatus   int
+		wantLocation string
+		wantBody     string
+	}{
+		{
+			name:         "bare path redirects and preserves query",
+			path:         "/sippy-ng?tab=main",
+			wantStatus:   http.StatusMovedPermanently,
+			wantLocation: "/sippy-ng/?tab=main",
+		},
+		{
+			name:       "slash path serves app",
+			path:       "/sippy-ng/",
+			wantStatus: http.StatusOK,
+			wantBody:   indexHTML,
+		},
+		{
+			name:       "SPA deep link serves app",
+			path:       "/sippy-ng/component_readiness/main",
+			wantStatus: http.StatusOK,
+			wantBody:   indexHTML,
+		},
+		{
+			name:       "static asset remains available",
+			path:       "/sippy-ng/static/js/main.js",
+			wantStatus: http.StatusOK,
+			wantBody:   appJS,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d", tc.wantStatus, response.Code)
+			}
+			if location := response.Header().Get("Location"); location != tc.wantLocation {
+				t.Errorf("expected Location %q, got %q", tc.wantLocation, location)
+			}
+			if body := response.Body.String(); !strings.Contains(body, tc.wantBody) {
+				t.Errorf("expected body to contain %q, got %q", tc.wantBody, body)
+			}
+		})
 	}
 }
 

@@ -2241,26 +2241,7 @@ func (s *Server) Serve() {
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
-	// Handle serving React version of frontend with support for browser router, i.e. anything not found
-	// goes to index.html
-	router.PathPrefix("/sippy-ng/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fs := s.sippyNG
-		if r.URL.Path != "/sippy-ng/" {
-			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
-			if _, err := fs.Open(fullPath); err != nil {
-				if !os.IsNotExist(err) {
-					w.WriteHeader(http.StatusNotFound)
-					w.Header().Set("Content-Type", "text/plain")
-					if _, err := fmt.Fprintf(w, "404 Not Found: %s", fullPath); err != nil { //nolint:gosec // G705: Content-Type is text/plain (set on line above), browsers will not execute script in plain text
-						log.WithError(err).Warningf("could not write response")
-					}
-					return
-				}
-				r.URL.Path = "/sippy-ng/"
-			}
-		}
-		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(fs))).ServeHTTP(w, r)
-	})
+	registerSippyNGRoutes(router, s.sippyNG)
 
 	router.PathPrefix("/static/").Handler(http.FileServer(http.FS(s.static)))
 
@@ -2929,6 +2910,32 @@ func (s *Server) Serve() {
 	if err := s.httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.WithError(err).Error("Server exited")
 	}
+}
+
+// The React app and its assets are served below /sippy-ng. Redirect the bare
+// basename so BrowserRouter and relative asset URLs see the expected path.
+func registerSippyNGRoutes(router *mux.Router, webFS fs.FS) {
+	// Handle serving React version of frontend with support for browser router, i.e. anything not found
+	// goes to index.html
+	spaHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sippy-ng/" {
+			fullPath := strings.TrimPrefix(r.URL.Path, "/sippy-ng/")
+			if _, err := webFS.Open(fullPath); err != nil {
+				if !os.IsNotExist(err) {
+					w.WriteHeader(http.StatusNotFound)
+					w.Header().Set("Content-Type", "text/plain")
+					if _, err := fmt.Fprintf(w, "404 Not Found: %s", fullPath); err != nil { //nolint:gosec // G705: Content-Type is text/plain (set on line above), browsers will not execute script in plain text
+						log.WithError(err).Warningf("could not write response")
+					}
+					return
+				}
+				r.URL.Path = "/sippy-ng/"
+			}
+		}
+		http.StripPrefix("/sippy-ng/", http.FileServer(http.FS(webFS))).ServeHTTP(w, r)
+	})
+	router.Handle("/sippy-ng/", spaHandler)
+	router.PathPrefix("/sippy-ng/").Handler(spaHandler)
 }
 
 type statusCapturingResponseWriter struct {
