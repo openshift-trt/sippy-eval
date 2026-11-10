@@ -21,6 +21,7 @@ import (
 	"github.com/openshift/sippy/test/e2e/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 func TestComponentReadinessViews(t *testing.T) {
@@ -29,6 +30,100 @@ func TestComponentReadinessViews(t *testing.T) {
 	require.NoError(t, err, "error making http request")
 	t.Logf("found %d views", len(views))
 	require.Greater(t, len(views), 0, "no views returned, check server cli params")
+}
+
+func TestSeededRegressionTrackingExamples(t *testing.T) {
+	dbc := util.CreateE2EPostgresConnection(t)
+
+	var extremeRegressions []models.TestRegression
+	err := dbc.DB.Preload("Views").
+		Where("release = ? AND test_id = ?", util.Release, "test-extreme-regression").Find(&extremeRegressions).Error
+	require.NoError(t, err)
+	var viewSpecificRegression *models.TestRegression
+	for i := range extremeRegressions {
+		regression := &extremeRegressions[i]
+		if regression.Closed.Valid || !containsString(regression.Variants, "Platform:gcp") {
+			continue
+		}
+		viewSpecificRegression = regression
+		break
+	}
+	require.NotNil(t, viewSpecificRegression, "the GCP regression should remain open after syncing the narrower AWS view")
+	var activeMainView bool
+	var activeAWSView bool
+	for _, view := range viewSpecificRegression.Views {
+		activeMainView = activeMainView || (view.ViewName == "4.22-main" && view.Active)
+		activeAWSView = activeAWSView || (view.ViewName == "4.22-aws" && view.Active)
+	}
+	assert.True(t, activeMainView, "the GCP regression should remain active in the main view")
+	assert.False(t, activeAWSView, "the GCP regression should not appear in the AWS-only view")
+
+	var sharedRegressions []models.TestRegression
+	err = dbc.DB.Preload("Views").
+		Where("release = ? AND test_name = ?", util.Release, "[sig-network] SDN pods can reach their nodes reliably").
+		Find(&sharedRegressions).Error
+	require.NoError(t, err)
+	var sharedRegression bool
+	for _, regression := range sharedRegressions {
+		var activeMain bool
+		var activeAWS bool
+		for _, view := range regression.Views {
+			activeMain = activeMain || (view.ViewName == "4.22-main" && view.Active)
+			activeAWS = activeAWS || (view.ViewName == "4.22-aws" && view.Active)
+		}
+		sharedRegression = sharedRegression || (activeMain && activeAWS && !regression.Closed.Valid)
+	}
+	assert.True(t, sharedRegression, "a seeded regression should be active in both views")
+
+	var triage models.Triage
+	err = dbc.DB.Preload("Bug").Preload("Regressions").Preload("TriageSymptoms").
+		Where("url = ?", "https://issues.redhat.com/browse/OCPBUGS-900001").First(&triage).Error
+	require.NoError(t, err)
+	assert.NotNil(t, triage.BugID)
+	require.NotNil(t, triage.Bug)
+	assert.Equal(t, "OCPBUGS-900001", triage.Bug.Key)
+	assert.Len(t, triage.Regressions, 2, "the seeded triage should span two regressions")
+	assert.NotEmpty(t, triage.TriageSymptoms)
+
+	var triagedRegression models.TestRegression
+	err = dbc.DB.Preload("JobRuns").
+		Where("release = ? AND test_name = ?", util.Release, "[sig-network] SDN pods can reach their nodes reliably").
+		First(&triagedRegression).Error
+	require.NoError(t, err)
+	require.NotEmpty(t, triagedRegression.JobRuns)
+	triagedRunIDs := sets.New[string]()
+	for _, jobRun := range triagedRegression.JobRuns {
+		triagedRunIDs.Insert(jobRun.ProwJobRunID)
+		assert.Contains(t, jobRun.JobLabels, "ClusterDNSFlake")
+		assert.Contains(t, jobRun.JobSymptoms, "DNSTimeoutSymptom")
+	}
+
+	var relatedRegression models.TestRegression
+	err = dbc.DB.Preload("JobRuns").Preload("Triages").
+		Where("release = ? AND test_name = ?", util.Release, "[sig-network] SDN pods can reach their node reliably").
+		First(&relatedRegression).Error
+	require.NoError(t, err)
+	assert.Empty(t, relatedRegression.Triages, "the related regression should remain untriaged")
+	assert.NotEmpty(t, relatedRegression.JobRuns)
+	assert.NotEmpty(t, relatedRegression.JobRuns[0].JobLabels)
+	assert.NotEmpty(t, relatedRegression.JobRuns[0].JobSymptoms)
+	var hasOverlappingRuns bool
+	for _, jobRun := range relatedRegression.JobRuns {
+		if triagedRunIDs.Has(jobRun.ProwJobRunID) {
+			hasOverlappingRuns = true
+			break
+		}
+	}
+	assert.True(t, hasOverlappingRuns, "the untriaged regression should be a potential match by failed job run overlap")
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRegressionCacheLoader(t *testing.T) {
