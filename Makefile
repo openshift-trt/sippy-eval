@@ -41,6 +41,7 @@ else
 	@echo "ARTIFACT_DIR is defined. Using $(ARTIFACT_DIR)/junit.xml."
 	gotestsum --junitfile $(ARTIFACT_DIR)/junit.xml ./pkg/...
 endif
+	cd mcp && .venv/bin/python -m pytest
 	LANG=en_US.utf-8 LC_ALL=en_US.utf-8 cd sippy-ng; CI=true npm test -- --coverage --passWithNoTests
 
 lint: builddir npm
