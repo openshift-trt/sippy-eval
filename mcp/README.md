@@ -71,6 +71,10 @@ Agent-oriented shortcuts live under **`.cursor/skills/`**, for example:
 
 After editing **`server.py`**, restart the **sippy-dev** MCP server (or reload the editor) so tool lists stay in sync.
 
+## Testing
+
+Run **`make mcp-test`** to execute the MCP server tests. **`make test`** includes these tests along with the Go and frontend test suites. The target creates `mcp/.venv` and installs `mcp/test-requirements.txt` when needed.
+
 ## Adding tools
 
 Add `@mcp.tool()` handlers in `server.py`, mirror existing patterns (`subprocess`, `_repo_path`, `_ensure_dev_log_dir`, credentials helpers), then restart MCP.
